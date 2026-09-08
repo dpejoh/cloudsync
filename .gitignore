@@ -4,7 +4,6 @@
 
 # npm
 node_modules
-package-lock.json
 pnpm-lock.yaml
 
 # build
@@ -17,5 +16,13 @@ data.json
 # debug
 logs.txt
 
+# data
+data/
+test-vps-data/
+
 # hidden files
 .*
+!.github/
+!.gitattributes
+!.gitignore
+
