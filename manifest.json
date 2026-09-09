@@ -1,11 +1,9 @@
 {
-  "id": "remotely-save",
-  "name": "Remotely Save",
-  "version": "0.5.25",
-  "minAppVersion": "0.13.21",
-  "description": "Yet another unofficial plugin allowing users to synchronize notes between local device and the cloud service.",
-  "author": "fyears",
-  "authorUrl": "https://github.com/fyears",
-  "isDesktopOnly": false,
-  "fundingUrl": "https://remotelysave.com"
+  "id": "cloudsync",
+  "name": "CloudSync",
+  "version": "1.0.0",
+  "minAppVersion": "0.15.0",
+  "description": "Fast, zero-friction, end-to-end encrypted note synchronization powered by Cloudflare Workers & R2.",
+  "author": "dpejoh",
+  "isDesktopOnly": false
 }
