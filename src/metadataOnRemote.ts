@@ -41,7 +41,7 @@ export const serializeMetadataOnRemote = (x: MetadataOnRemote) => {
   const y = x;
 
   if (y["version"] === undefined) {
-    y["version"] === DEFAULT_VERSION_FOR_METADATAONREMOTE;
+    y["version"] = DEFAULT_VERSION_FOR_METADATAONREMOTE;
   }
   if (y["generatedWhen"] === undefined) {
     y["generatedWhen"] = Date.now();
@@ -80,6 +80,9 @@ export const deserializeMetadataOnRemote = (x: string | ArrayBuffer) => {
   }
 
   if (!("readme" in y2 && "d" in y2)) {
+    if (typeof y2 === "object" && y2 !== null && ("deletions" in y2 || "version" in y2)) {
+      return y2 as MetadataOnRemote;
+    }
     throw new Error(
       'invalid remote meta data file (no "readme" or "d" fields)!'
     );

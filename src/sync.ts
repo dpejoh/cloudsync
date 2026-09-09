@@ -2,30 +2,32 @@
 import AggregateError from "aggregate-error";
 import PQueue from "p-queue";
 import XRegExp from "xregexp";
-import type {
-  ConflictActionType,
-  EmptyFolderCleanType,
-  Entity,
-  MixedEntity,
-  RemotelySavePluginSettings,
-  SUPPORTED_SERVICES_TYPE,
-  SyncDirectionType,
-  SyncTriggerSourceType,
-} from "../../src/baseTypes";
-import { copyFile, copyFileOrFolder, copyFolder } from "../../src/copyLogic";
-import type { FakeFs } from "../../src/fsAll";
-import type { FakeFsEncrypt } from "../../src/fsEncrypt";
+import {
+  DEFAULT_DEBUG_FOLDER,
+  DEFAULT_DEVICE_CONFIGS_FOLDER,
+  type ConflictActionType,
+  type EmptyFolderCleanType,
+  type Entity,
+  type MixedEntity,
+  type RemotelySavePluginSettings,
+  type SUPPORTED_SERVICES_TYPE,
+  type SyncDirectionType,
+  type SyncTriggerSourceType,
+} from "./baseTypes";
+import { copyFile, copyFileOrFolder, copyFolder } from "./copyLogic";
+import type { FakeFs } from "./fsAll";
+import type { FakeFsEncrypt } from "./fsEncrypt";
 import {
   type InternalDBs,
   clearPrevSyncRecordByVaultAndProfile,
   getAllPrevSyncRecordsByVaultAndProfile,
   insertSyncPlanRecordByVault,
   upsertPrevSyncRecordByVaultAndProfile,
-} from "../../src/localdb";
+} from "./localdb";
 import {
   DEFAULT_FILE_NAME_FOR_METADATAONREMOTE,
   DEFAULT_FILE_NAME_FOR_METADATAONREMOTE2,
-} from "../../src/metadataOnRemote";
+} from "./metadataOnRemote";
 import {
   atWhichLevel,
   checkValidName,
@@ -35,15 +37,9 @@ import {
   isSpecialFolderNameToSkip,
   roughSizeOfObject,
   unixTimeToStr,
-} from "../../src/misc";
-import type { Profiler } from "../../src/profiler";
-import { checkProRunnableAndFixInplace } from "./account";
-import { isMergable, mergeFile, tryDuplicateFile } from "./conflictLogic";
-import {
-  clearFileContentHistoryByVaultAndProfile,
-  getFileContentHistoryByVaultAndProfile,
-  upsertFileContentHistoryByVaultAndProfile,
-} from "./localdb";
+} from "./misc";
+import type { Profiler } from "./profiler";
+import { tryDuplicateFile } from "./conflictLogic";
 
 const copyEntityAndFixTimeFormat = (
   src: Entity,
@@ -54,10 +50,6 @@ const copyEntityAndFixTimeFormat = (
     if (result.mtimeCli === 0) {
       result.mtimeCli = undefined;
     } else {
-      if (serviceType === "s3" || serviceType === "dropbox") {
-        // round to second instead of millisecond
-        result.mtimeCli = Math.floor(result.mtimeCli / 1000.0) * 1000;
-      }
       result.mtimeCliFmt = unixTimeToStr(result.mtimeCli);
     }
   }
@@ -65,10 +57,6 @@ const copyEntityAndFixTimeFormat = (
     if (result.ctimeCli === 0) {
       result.ctimeCli = undefined;
     } else {
-      if (serviceType === "s3" || serviceType === "dropbox") {
-        // round to second instead of millisecond
-        result.ctimeCli = Math.floor(result.ctimeCli / 1000.0) * 1000;
-      }
       result.ctimeCliFmt = unixTimeToStr(result.ctimeCli);
     }
   }
@@ -76,10 +64,6 @@ const copyEntityAndFixTimeFormat = (
     if (result.mtimeSvr === 0) {
       result.mtimeSvr = undefined;
     } else {
-      if (serviceType === "s3" || serviceType === "dropbox") {
-        // round to second instead of millisecond
-        result.mtimeSvr = Math.floor(result.mtimeSvr / 1000.0) * 1000;
-      }
       result.mtimeSvrFmt = unixTimeToStr(result.mtimeSvr);
     }
   }
@@ -87,10 +71,6 @@ const copyEntityAndFixTimeFormat = (
     if (result.prevSyncTime === 0) {
       result.prevSyncTime = undefined;
     } else {
-      if (serviceType === "s3" || serviceType === "dropbox") {
-        // round to second instead of millisecond
-        result.prevSyncTime = Math.floor(result.prevSyncTime / 1000.0) * 1000;
-      }
       result.prevSyncTimeFmt = unixTimeToStr(result.prevSyncTime);
     }
   }
@@ -120,6 +100,16 @@ const ensureMTimeOfRemoteEntityValid = (remote: Entity) => {
     }
   }
   return remote;
+};
+
+export const isMTimeEqual = (
+  t1?: number,
+  t2?: number,
+  toleranceMs = 1500
+): boolean => {
+  if (t1 === undefined || t2 === undefined) return false;
+  if (t1 === t2) return true;
+  return Math.abs(t1 - t2) <= toleranceMs;
 };
 
 const isInsideObsFolder = (x: string, configDir: string) => {
@@ -154,7 +144,8 @@ export const checkIsSkipItemOrNotByName = (
   syncUnderscoreItems: boolean,
   configDir: string,
   ignorePaths: string[],
-  onlyAllowPaths: string[]
+  onlyAllowPaths: string[],
+  settings?: Partial<RemotelySavePluginSettings>
 ): IsSkipResult => {
   if (key === undefined) {
     throw Error(`checkIsSkipItemOrNotByName meets undefinded key!`);
@@ -199,6 +190,98 @@ export const checkIsSkipItemOrNotByName = (
           isExplictlyIgnored = true;
           finalIsIgnored = true;
         }
+      }
+    }
+  }
+
+  if (
+    key.startsWith(DEFAULT_DEBUG_FOLDER) ||
+    key.startsWith(DEFAULT_DEVICE_CONFIGS_FOLDER)
+  ) {
+    finalIsIgnored = true;
+  }
+
+  if (finalIsIgnored === undefined && settings) {
+    if (isInsideObsFolder(key, configDir)) {
+      const relConfig = key.slice(configDir.length).replace(/^\/+/, "");
+      if (
+        (relConfig === "app.json" || relConfig === "types.json") &&
+        settings.syncMainSettings === false
+      ) {
+        finalIsIgnored = true;
+      } else if (
+        relConfig === "appearance.json" &&
+        settings.syncAppearance === false
+      ) {
+        finalIsIgnored = true;
+      } else if (
+        (relConfig.startsWith("themes/") || relConfig.startsWith("snippets/")) &&
+        settings.syncAppearanceData === false
+      ) {
+        finalIsIgnored = true;
+      } else if (
+        relConfig === "hotkeys.json" &&
+        settings.syncHotkeys === false
+      ) {
+        finalIsIgnored = true;
+      } else if (
+        relConfig === "core-plugins.json" &&
+        settings.syncCorePlugins === false
+      ) {
+        finalIsIgnored = true;
+      } else if (
+        relConfig.startsWith("core-plugins/") &&
+        settings.syncCorePluginData === false
+      ) {
+        finalIsIgnored = true;
+      } else if (
+        relConfig === "community-plugins.json" &&
+        settings.syncCommunityPlugins === false
+      ) {
+        finalIsIgnored = true;
+      } else if (
+        relConfig.startsWith("plugins/") &&
+        settings.syncCommunityPluginData === false
+      ) {
+        finalIsIgnored = true;
+      }
+    } else {
+      const lowerKey = key.toLowerCase();
+      const dotIdx = lowerKey.lastIndexOf(".");
+      const ext = dotIdx !== -1 ? lowerKey.slice(dotIdx + 1) : "";
+
+      const imageExts = ["bmp", "png", "jpg", "jpeg", "gif", "svg", "webp"];
+      const audioExts = [
+        "mp3",
+        "wav",
+        "m4a",
+        "3gp",
+        "flac",
+        "ogg",
+        "oga",
+        "opus",
+      ];
+      const videoExts = ["mp4", "webm", "ogv", "mov", "mkv"];
+      const standardExts = ["md", "markdown", "canvas"];
+
+      if (imageExts.includes(ext) && settings.syncImages === false) {
+        finalIsIgnored = true;
+      } else if (audioExts.includes(ext) && settings.syncAudio === false) {
+        finalIsIgnored = true;
+      } else if (videoExts.includes(ext) && settings.syncVideos === false) {
+        finalIsIgnored = true;
+      } else if (ext === "pdf" && settings.syncPdfs === false) {
+        finalIsIgnored = true;
+      } else if (
+        settings.syncUnsupported === false &&
+        ext !== "" &&
+        !standardExts.includes(ext) &&
+        !imageExts.includes(ext) &&
+        !audioExts.includes(ext) &&
+        !videoExts.includes(ext) &&
+        ext !== "pdf"
+      ) {
+        finalIsIgnored = true;
       }
     }
   }
@@ -370,7 +453,8 @@ const ensembleMixedEnties = async (
   fsEncrypt: FakeFsEncrypt,
   serviceType: SUPPORTED_SERVICES_TYPE,
 
-  profiler: Profiler | undefined
+  profiler: Profiler | undefined,
+  settings?: Partial<RemotelySavePluginSettings>
 ): Promise<SyncPlanType> => {
   profiler?.addIndent();
   profiler?.insert("ensembleMixedEnties: enter");
@@ -398,7 +482,8 @@ const ensembleMixedEnties = async (
       syncUnderscoreItems,
       configDir,
       ignorePaths,
-      onlyAllowPaths
+      onlyAllowPaths,
+      settings
     );
     skipOrNotResults[key] = skipOrNot;
     if (skipOrNot.finalIsIgnored && !key.startsWith(configDir)) {
@@ -448,7 +533,8 @@ const ensembleMixedEnties = async (
           syncUnderscoreItems,
           configDir,
           ignorePaths,
-          onlyAllowPaths
+          onlyAllowPaths,
+          settings
         );
         skipOrNotResults[key] = skipOrNot;
       }
@@ -485,7 +571,8 @@ const ensembleMixedEnties = async (
         syncUnderscoreItems,
         configDir,
         ignorePaths,
-        onlyAllowPaths
+        onlyAllowPaths,
+        settings
       );
       skipOrNotResults[key] = skipOrNot;
     }
@@ -775,8 +862,8 @@ const getSyncPlanInplace = async (
         mixedEntry.change = false;
       } else if (local !== undefined && remote !== undefined) {
         if (
-          (local.mtimeCli === remote.mtimeCli ||
-            local.mtimeCli === remote.mtimeSvr) &&
+          (isMTimeEqual(local.mtimeCli, remote.mtimeCli) ||
+            isMTimeEqual(local.mtimeCli, remote.mtimeSvr)) &&
           local.sizeEnc === remote.sizeEnc
         ) {
           // completely equal / identical
@@ -788,11 +875,11 @@ const getSyncPlanInplace = async (
           // Both exists, but modified or conflict
           // Look for past files of A or B.
           const localEqualPrevSync =
-            prevSync?.mtimeCli === local.mtimeCli &&
+            isMTimeEqual(prevSync?.mtimeCli, local.mtimeCli) &&
             prevSync?.sizeEnc === local.sizeEnc;
           const remoteEqualPrevSync =
-            (prevSync?.mtimeSvr === remote.mtimeCli ||
-              prevSync?.mtimeSvr === remote.mtimeSvr) &&
+            (isMTimeEqual(prevSync?.mtimeSvr, remote.mtimeCli) ||
+              isMTimeEqual(prevSync?.mtimeSvr, remote.mtimeSvr)) &&
             prevSync?.sizeEnc === remote.sizeEnc;
 
           if (localEqualPrevSync && !remoteEqualPrevSync) {
@@ -854,11 +941,19 @@ const getSyncPlanInplace = async (
             if (prevSync === undefined) {
               // Didn't exist means both are new
               if (syncDirection === "bidirectional") {
-                if (
-                  conflictAction === "keep_newer" ||
-                  (conflictAction === "smart_conflict" &&
-                    key.startsWith(`${configDir}/`))
-                ) {
+                if (conflictAction === "keep_larger") {
+                  if (local.sizeEnc! >= remote.sizeEnc!) {
+                    mixedEntry.decisionBranch = 13;
+                    mixedEntry.decision = "conflict_created_then_keep_local";
+                    mixedEntry.change = true;
+                    keptFolder.add(getParentFolder(key));
+                  } else {
+                    mixedEntry.decisionBranch = 14;
+                    mixedEntry.decision = "conflict_created_then_keep_remote";
+                    mixedEntry.change = true;
+                    keptFolder.add(getParentFolder(key));
+                  }
+                } else {
                   if (
                     (local.mtimeCli ?? local.mtimeSvr ?? 0) >=
                     (remote.mtimeCli ?? remote.mtimeSvr ?? 0)
@@ -873,24 +968,6 @@ const getSyncPlanInplace = async (
                     mixedEntry.change = true;
                     keptFolder.add(getParentFolder(key));
                   }
-                } else if (conflictAction === "keep_larger") {
-                  if (local.sizeEnc! >= remote.sizeEnc!) {
-                    mixedEntry.decisionBranch = 13;
-                    mixedEntry.decision = "conflict_created_then_keep_local";
-                    mixedEntry.change = true;
-                    keptFolder.add(getParentFolder(key));
-                  } else {
-                    mixedEntry.decisionBranch = 14;
-                    mixedEntry.decision = "conflict_created_then_keep_remote";
-                    mixedEntry.change = true;
-                    keptFolder.add(getParentFolder(key));
-                  }
-                } else if (conflictAction === "smart_conflict") {
-                  // try merge!
-                  mixedEntry.decisionBranch = 302;
-                  mixedEntry.decision = "conflict_created_then_smart_conflict";
-                  mixedEntry.change = true;
-                  keptFolder.add(getParentFolder(key));
                 }
               } else if (
                 syncDirection === "incremental_pull_only" ||
@@ -916,11 +993,19 @@ const getSyncPlanInplace = async (
             } else {
               // Both exist but don't compare means both are modified
               if (syncDirection === "bidirectional") {
-                if (
-                  conflictAction === "keep_newer" ||
-                  (conflictAction === "smart_conflict" &&
-                    key.startsWith(`${configDir}/`))
-                ) {
+                if (conflictAction === "keep_larger") {
+                  if (local.sizeEnc! >= remote.sizeEnc!) {
+                    mixedEntry.decisionBranch = 18;
+                    mixedEntry.decision = "conflict_modified_then_keep_local";
+                    mixedEntry.change = true;
+                    keptFolder.add(getParentFolder(key));
+                  } else {
+                    mixedEntry.decisionBranch = 19;
+                    mixedEntry.decision = "conflict_modified_then_keep_remote";
+                    mixedEntry.change = true;
+                    keptFolder.add(getParentFolder(key));
+                  }
+                } else {
                   if (
                     (local.mtimeCli ?? local.mtimeSvr ?? 0) >=
                     (remote.mtimeCli ?? remote.mtimeSvr ?? 0)
@@ -935,24 +1020,6 @@ const getSyncPlanInplace = async (
                     mixedEntry.change = true;
                     keptFolder.add(getParentFolder(key));
                   }
-                } else if (conflictAction === "keep_larger") {
-                  if (local.sizeEnc! >= remote.sizeEnc!) {
-                    mixedEntry.decisionBranch = 18;
-                    mixedEntry.decision = "conflict_modified_then_keep_local";
-                    mixedEntry.change = true;
-                    keptFolder.add(getParentFolder(key));
-                  } else {
-                    mixedEntry.decisionBranch = 19;
-                    mixedEntry.decision = "conflict_modified_then_keep_remote";
-                    mixedEntry.change = true;
-                    keptFolder.add(getParentFolder(key));
-                  }
-                } else if (conflictAction === "smart_conflict") {
-                  // yeah, try to merge them!
-                  mixedEntry.decisionBranch = 301;
-                  mixedEntry.decision = "conflict_modified_then_smart_conflict";
-                  mixedEntry.change = true;
-                  keptFolder.add(getParentFolder(key));
                 }
               } else if (
                 syncDirection === "incremental_pull_only" ||
@@ -1015,8 +1082,8 @@ const getSyncPlanInplace = async (
             keptFolder.add(getParentFolder(key));
           }
         } else if (
-          (prevSync.mtimeSvr === remote.mtimeCli ||
-            prevSync.mtimeSvr === remote.mtimeSvr) &&
+          (isMTimeEqual(prevSync.mtimeSvr, remote.mtimeCli) ||
+            isMTimeEqual(prevSync.mtimeSvr, remote.mtimeSvr)) &&
           prevSync.sizeEnc === remote.sizeEnc
         ) {
           // if B is in the previous list and UNMODIFIED, B has been deleted by A
@@ -1097,8 +1164,8 @@ const getSyncPlanInplace = async (
             keptFolder.add(getParentFolder(key));
           }
         } else if (
-          (prevSync.mtimeSvr === local.mtimeCli ||
-            prevSync.mtimeCli === local.mtimeCli) &&
+          (isMTimeEqual(prevSync.mtimeSvr, local.mtimeCli) ||
+            isMTimeEqual(prevSync.mtimeCli, local.mtimeCli)) &&
           prevSync.sizeEnc === local.sizeEnc
         ) {
           // if A is in the previous list and UNMODIFIED, A has been deleted by B
@@ -1376,24 +1443,11 @@ const splitFourStepsOnEntityMappings = (
   };
 };
 
-const fullfillMTimeOfRemoteEntityInplace = (
+export const fullfillMTimeOfRemoteEntityInplace = (
   remote: Entity,
   mtimeCli?: number
 ) => {
-  // TODO:
-  // on 20240405, we find that dropbox's mtimeCli is not updated
-  // if the content is not updated even the time is updated...
-  // so we do not check remote.mtimeCli for now..
-  if (
-    mtimeCli !== undefined &&
-    mtimeCli > 0 /* &&
-    (remote.mtimeCli === undefined ||
-      remote.mtimeCli <= 0 ||
-      (remote.mtimeSvr !== undefined &&
-        remote.mtimeSvr > 0 &&
-        remote.mtimeCli >= remote.mtimeSvr))
-    */
-  ) {
+  if (mtimeCli !== undefined && mtimeCli > 0) {
     remote.mtimeCli = mtimeCli;
   }
   return remote;
@@ -1423,14 +1477,6 @@ const dispatchOperationToActualV3 = async (
       profileID,
       key
     );
-    if (conflictAction === "smart_conflict") {
-      await clearFileContentHistoryByVaultAndProfile(
-        db,
-        vaultRandomID,
-        profileID,
-        key
-      );
-    }
   } else if (
     r.decision === "local_is_created_too_large_then_do_nothing" ||
     r.decision === "remote_is_created_too_large_then_do_nothing" ||
@@ -1446,39 +1492,13 @@ const dispatchOperationToActualV3 = async (
   ) {
     // !! we MIGHT need to upsert the record,
     // so that next time we can determine the change delta
-
     if (r.prevSync !== undefined) {
-      // if we have prevSync,
-      // we don't need to update prevSync, because the record is already there!
-
-      // but we might need to update content, because it's a new feature
-      if (conflictAction === "smart_conflict") {
-        if (isMergable(r.local!)) {
-          const k = await getFileContentHistoryByVaultAndProfile(
-            db,
-            vaultRandomID,
-            profileID,
-            r.local!
-          );
-          if (k === null || k === undefined) {
-            await upsertFileContentHistoryByVaultAndProfile(
-              db,
-              vaultRandomID,
-              profileID,
-              r.local!,
-              await fsLocal.readFile(r.local!.keyRaw)
-            );
-          }
-        }
-      }
+      // Record already exists
     } else {
-      // if we don't have prevSync, we use remote entity AND local mtime
-      // as if it is "uploaded"
+      // if we don't have prevSync, we use remote entity AND local mtime as if uploaded
       if (r.remote !== undefined) {
         let entity = r.remote;
-        // TODO: abstract away the dirty hack
         entity = fullfillMTimeOfRemoteEntityInplace(entity, r.local?.mtimeCli);
-
         if (entity !== undefined) {
           await upsertPrevSyncRecordByVaultAndProfile(
             db,
@@ -1486,17 +1506,6 @@ const dispatchOperationToActualV3 = async (
             profileID,
             entity
           );
-          if (conflictAction === "smart_conflict") {
-            if (isMergable(entity)) {
-              await upsertFileContentHistoryByVaultAndProfile(
-                db,
-                vaultRandomID,
-                profileID,
-                entity,
-                await fsLocal.readFile(entity.keyRaw)
-              );
-            }
-          }
         }
       }
     }
@@ -1507,33 +1516,19 @@ const dispatchOperationToActualV3 = async (
     r.decision === "conflict_created_then_keep_local" ||
     r.decision === "conflict_modified_then_keep_local"
   ) {
-    // console.debug(`before upload in sync, r=${JSON.stringify(r, null, 2)}`);
     const mtimeCli = (await fsLocal.stat(r.key)).mtimeCli!;
-    const { entity, content } = await copyFileOrFolder(
+    const { entity } = await copyFileOrFolder(
       r.key,
       fsLocal,
       fsEncrypt
     );
-    // TODO: abstract away the dirty hack
     fullfillMTimeOfRemoteEntityInplace(entity, mtimeCli);
-    // console.debug(`after fullfill, entity=${JSON.stringify(entity,null,2)}`)
     await upsertPrevSyncRecordByVaultAndProfile(
       db,
       vaultRandomID,
       profileID,
       entity
     );
-    if (conflictAction === "smart_conflict") {
-      if (isMergable(entity)) {
-        await upsertFileContentHistoryByVaultAndProfile(
-          db,
-          vaultRandomID,
-          profileID,
-          entity,
-          content!
-        );
-      }
-    }
   } else if (
     r.decision === "remote_is_modified_then_pull" ||
     r.decision === "remote_is_created_then_pull" ||
@@ -1541,14 +1536,10 @@ const dispatchOperationToActualV3 = async (
     r.decision === "conflict_modified_then_keep_remote" ||
     r.decision === "folder_existed_remote_then_also_create_local"
   ) {
-    let e1: Entity | undefined = undefined;
-    let c1: ArrayBuffer | undefined = undefined;
     if (r.key.endsWith("/")) {
       await fsLocal.mkdir(r.key);
     } else {
-      const { entity, content } = await copyFile(r.key, fsEncrypt, fsLocal);
-      e1 = entity;
-      c1 = content;
+      await copyFile(r.key, fsEncrypt, fsLocal);
     }
     await upsertPrevSyncRecordByVaultAndProfile(
       db,
@@ -1556,19 +1547,7 @@ const dispatchOperationToActualV3 = async (
       profileID,
       r.remote!
     );
-    if (conflictAction === "smart_conflict") {
-      if (isMergable(r.remote!)) {
-        await upsertFileContentHistoryByVaultAndProfile(
-          db,
-          vaultRandomID,
-          profileID,
-          r.remote!,
-          c1! // always file, always has real value
-        );
-      }
-    }
   } else if (r.decision === "local_is_deleted_thus_also_delete_remote") {
-    // local is deleted, we need to delete remote now
     await fsEncrypt.rm(r.key);
     await clearPrevSyncRecordByVaultAndProfile(
       db,
@@ -1576,18 +1555,7 @@ const dispatchOperationToActualV3 = async (
       profileID,
       r.key
     );
-    if (conflictAction === "smart_conflict") {
-      if (isMergable(r.remote!)) {
-        await clearFileContentHistoryByVaultAndProfile(
-          db,
-          vaultRandomID,
-          profileID,
-          r.key
-        );
-      }
-    }
   } else if (r.decision === "remote_is_deleted_thus_also_delete_local") {
-    // remote is deleted, we need to delete local now
     await fsLocal.rm(r.key);
     await clearPrevSyncRecordByVaultAndProfile(
       db,
@@ -1595,86 +1563,43 @@ const dispatchOperationToActualV3 = async (
       profileID,
       r.key
     );
-    if (conflictAction === "smart_conflict") {
-      if (isMergable(r.local!)) {
-        await clearFileContentHistoryByVaultAndProfile(
-          db,
-          vaultRandomID,
-          profileID,
-          r.key
-        );
-      }
-    }
   } else if (
     r.decision === "conflict_created_then_smart_conflict" ||
     r.decision === "conflict_modified_then_smart_conflict"
   ) {
-    // heavy lifting
-    if (isMergable(r.local!, r.remote!)) {
-      const origContent = await getFileContentHistoryByVaultAndProfile(
-        db,
-        vaultRandomID,
-        profileID,
-        r.local!
-      );
-      // console.debug(`we get origContent:`)
-      // console.debug(origContent)
-      const { entity, content } = await mergeFile(
-        r.key,
-        fsLocal,
-        fsEncrypt,
-        origContent
-      );
-      await upsertPrevSyncRecordByVaultAndProfile(
-        db,
-        vaultRandomID,
-        profileID,
-        entity
-      );
-      await upsertFileContentHistoryByVaultAndProfile(
-        db,
-        vaultRandomID,
-        profileID,
-        entity,
-        content
-      );
-    } else {
-      // duplicate the files
-      await clearPrevSyncRecordByVaultAndProfile(
-        db,
-        vaultRandomID,
-        profileID,
-        r.key
-      );
-      const mtimeCli = (await fsLocal.stat(r.key)).mtimeCli!;
-      await tryDuplicateFile(
-        r.key,
-        fsLocal,
-        fsEncrypt,
-        async (upload) => {
-          if (upload !== undefined) {
-            // TODO: abstract away the dirty hack
-            fullfillMTimeOfRemoteEntityInplace(upload, mtimeCli);
-            await upsertPrevSyncRecordByVaultAndProfile(
-              db,
-              vaultRandomID,
-              profileID,
-              upload
-            );
-          }
-        },
-        async (download) => {
-          if (download !== undefined) {
-            await upsertPrevSyncRecordByVaultAndProfile(
-              db,
-              vaultRandomID,
-              profileID,
-              download
-            );
-          }
+    await clearPrevSyncRecordByVaultAndProfile(
+      db,
+      vaultRandomID,
+      profileID,
+      r.key
+    );
+    const mtimeCli = (await fsLocal.stat(r.key)).mtimeCli!;
+    await tryDuplicateFile(
+      r.key,
+      fsLocal,
+      fsEncrypt,
+      async (upload) => {
+        if (upload !== undefined) {
+          fullfillMTimeOfRemoteEntityInplace(upload, mtimeCli);
+          await upsertPrevSyncRecordByVaultAndProfile(
+            db,
+            vaultRandomID,
+            profileID,
+            upload
+          );
         }
-      );
-    }
+      },
+      async (download) => {
+        if (download !== undefined) {
+          await upsertPrevSyncRecordByVaultAndProfile(
+            db,
+            vaultRandomID,
+            profileID,
+            download
+          );
+        }
+      }
+    );
   } else if (r.decision === "folder_to_be_created") {
     await fsLocal.mkdir(r.key);
     const { entity } = await copyFolder(r.key, fsLocal, fsEncrypt);
@@ -1937,9 +1862,7 @@ export async function syncer(
   let step = 0;
 
   try {
-    // check pro feature
-    // if anything goes wrong, it will throw
-    await checkProRunnableAndFixInplace(settings, pluginVersion, configSaver);
+    // Zero-friction mode: no pro checks, full sync enabled
 
     // try mode?
     await notifyFunc?.(triggerSource, step);
@@ -2012,7 +1935,8 @@ export async function syncer(
       settings.onlyAllowPaths ?? [],
       fsEncrypt,
       settings.serviceType,
-      profiler
+      profiler,
+      settings
     );
     profiler?.insert(`finish step${step} (build partial mixedEntity)`);
 
@@ -2072,6 +1996,7 @@ export async function syncer(
       );
     }
   } catch (error: any) {
+    console.error("CloudSync syncer error caught:", error);
     profiler?.insert("start error branch");
     everythingOk = false;
     await errNotifyFunc?.(triggerSource, error as Error);
