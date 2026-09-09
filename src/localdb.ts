@@ -6,13 +6,13 @@ ep2(localforage);
 export type LocalForage = typeof localforage;
 import { nanoid } from "nanoid";
 
-import type { SyncPlanType } from "../pro/src/sync";
+import type { SyncPlanType } from "./sync";
 import type { Entity, SUPPORTED_SERVICES_TYPE } from "./baseTypes";
 import { unixTimeToStr } from "./misc";
 
 const DB_VERSION_NUMBER_IN_HISTORY = [20211114, 20220108, 20220326, 20240220];
 export const DEFAULT_DB_VERSION_NUMBER: number = 20240220;
-export const DEFAULT_DB_NAME = "remotelysavedb";
+export const DEFAULT_DB_NAME = "cloudsyncdb";
 export const DEFAULT_TBL_VERSION = "schemaversion";
 export const DEFAULT_SYNC_PLANS_HISTORY = "syncplanshistory";
 export const DEFAULT_TBL_VAULT_RANDOM_ID_MAPPING = "vaultrandomidmapping";
@@ -20,34 +20,6 @@ export const DEFAULT_TBL_LOGGER_OUTPUT = "loggeroutput";
 export const DEFAULT_TBL_SIMPLE_KV_FOR_MISC = "simplekvformisc";
 export const DEFAULT_TBL_PREV_SYNC_RECORDS = "prevsyncrecords";
 export const DEFAULT_TBL_PROFILER_RESULTS = "profilerresults";
-export const DEFAULT_TBL_FILE_CONTENT_HISTORY = "filecontenthistory";
-
-/**
- * @deprecated
- */
-export const DEFAULT_TBL_FILE_HISTORY = "filefolderoperationhistory";
-/**
- * @deprecated
- */
-export const DEFAULT_TBL_SYNC_MAPPING = "syncmetadatahistory";
-
-/**
- * @deprecated
- * But we cannot remove it. Because we want to migrate the old data.
- */
-interface SyncMetaMappingRecord {
-  localKey: string;
-  remoteKey: string;
-  localSize: number;
-  remoteSize: number;
-  localMtime: number;
-  remoteMtime: number;
-  remoteExtraKey: string;
-  remoteType: SUPPORTED_SERVICES_TYPE;
-  keyType: "folder" | "file";
-  vaultRandomID: string;
-}
-
 interface SyncPlanRecord {
   ts: number;
   remoteType: string;
@@ -63,122 +35,7 @@ export interface InternalDBs {
   simpleKVForMiscTbl: LocalForage;
   prevSyncRecordsTbl: LocalForage;
   profilerResultsTbl: LocalForage;
-  fileContentHistoryTbl: LocalForage;
-
-  /**
-   * @deprecated
-   * But we cannot remove it. Because we want to migrate the old data.
-   */
-  fileHistoryTbl: LocalForage;
-
-  /**
-   * @deprecated
-   * But we cannot remove it. Because we want to migrate the old data.
-   */
-  syncMappingTbl: LocalForage;
 }
-
-/**
- * TODO
- * @param syncMappings
- * @returns
- */
-const fromSyncMappingsToPrevSyncRecords = (
-  oldSyncMappings: SyncMetaMappingRecord[]
-): Entity[] => {
-  const res: Entity[] = [];
-  for (const oldMapping of oldSyncMappings) {
-    const newEntity: Entity = {
-      key: oldMapping.localKey,
-      keyEnc: oldMapping.remoteKey,
-      keyRaw:
-        oldMapping.remoteKey !== undefined && oldMapping.remoteKey !== ""
-          ? oldMapping.remoteKey
-          : oldMapping.localKey,
-      mtimeCli: oldMapping.localMtime,
-      mtimeSvr: oldMapping.remoteMtime,
-      size: oldMapping.localSize,
-      sizeEnc: oldMapping.remoteSize,
-      sizeRaw:
-        oldMapping.remoteKey !== undefined && oldMapping.remoteKey !== ""
-          ? oldMapping.remoteSize
-          : oldMapping.localSize,
-      etag: oldMapping.remoteExtraKey,
-    };
-
-    res.push(newEntity);
-  }
-  return res;
-};
-
-/**
- *
- * @param db
- * @param vaultRandomID
- * Migrate the sync mapping record to sync Entity.
- */
-const migrateDBsFrom20220326To20240220 = async (
-  db: InternalDBs,
-  vaultRandomID: string,
-  profileID: string
-) => {
-  const oldVer = 20220326;
-  const newVer = 20240220;
-  console.debug(`start upgrading internal db from ${oldVer} to ${newVer}`);
-
-  // from sync mapping to prev sync
-  const syncMappings = await getAllSyncMetaMappingByVault(db, vaultRandomID);
-  const prevSyncRecords = fromSyncMappingsToPrevSyncRecords(syncMappings);
-  for (const prevSyncRecord of prevSyncRecords) {
-    await upsertPrevSyncRecordByVaultAndProfile(
-      db,
-      vaultRandomID,
-      profileID,
-      prevSyncRecord
-    );
-  }
-
-  // // clear not used data
-  // // as of 20240220, we don't call them,
-  // // for the opportunity for users to downgrade
-  // await clearFileHistoryOfEverythingByVault(db, vaultRandomID);
-  // await clearAllSyncMetaMappingByVault(db, vaultRandomID);
-
-  await db.versionTbl.setItem(`${vaultRandomID}\tversion`, newVer);
-  console.debug(`finish upgrading internal db from ${oldVer} to ${newVer}`);
-};
-
-const migrateDBs = async (
-  db: InternalDBs,
-  oldVer: number,
-  newVer: number,
-  vaultRandomID: string,
-  profileID: string
-) => {
-  if (oldVer === newVer) {
-    return;
-  }
-
-  // as of 20240220, we assume everyone is using 20220326 already
-  // drop any old code to reduce the verbose
-  if (oldVer < 20220326) {
-    throw Error(
-      "You are using a very old version of Remotely Save. No way to auto update internal DB. Please install and enable 0.3.40 firstly, then install a later version."
-    );
-  }
-
-  if (oldVer === 20220326 && newVer === 20240220) {
-    return await migrateDBsFrom20220326To20240220(db, vaultRandomID, profileID);
-  }
-
-  if (newVer < oldVer) {
-    throw Error(
-      "You've installed a new version, but then downgrade to an old version. Stop working!"
-    );
-  }
-  // not implemented
-  throw Error(`not supported internal db changes from ${oldVer} to ${newVer}`);
-};
 
 export const prepareDBs = async (
   vaultBasePath: string,
@@ -215,19 +72,6 @@ export const prepareDBs = async (
       storeName: DEFAULT_TBL_PROFILER_RESULTS,
     }),
 
-    fileHistoryTbl: localforage.createInstance({
-      name: DEFAULT_DB_NAME,
-      storeName: DEFAULT_TBL_FILE_HISTORY,
-    }),
-    syncMappingTbl: localforage.createInstance({
-      name: DEFAULT_DB_NAME,
-      storeName: DEFAULT_TBL_SYNC_MAPPING,
-    }),
-
-    fileContentHistoryTbl: localforage.createInstance({
-      name: DEFAULT_DB_NAME,
-      storeName: DEFAULT_TBL_FILE_CONTENT_HISTORY,
-    }),
   } as InternalDBs;
 
   // try to get vaultRandomID firstly
@@ -259,31 +103,13 @@ export const prepareDBs = async (
     throw Error("no vaultRandomID found or generated");
   }
 
-  // as of 20240220, we set the version per vault, instead of global "version"
   const originalVersion: number | null =
     (await db.versionTbl.getItem(`${vaultRandomID}\tversion`)) ??
     (await db.versionTbl.getItem("version"));
-  if (originalVersion === null) {
-    console.debug(
-      `no internal db version, setting it to ${DEFAULT_DB_VERSION_NUMBER}`
-    );
-    // as of 20240220, we set the version per vault, instead of global "version"
+  if (originalVersion === null || originalVersion !== DEFAULT_DB_VERSION_NUMBER) {
     await db.versionTbl.setItem(
       `${vaultRandomID}\tversion`,
       DEFAULT_DB_VERSION_NUMBER
-    );
-  } else if (originalVersion === DEFAULT_DB_VERSION_NUMBER) {
-    // do nothing
-  } else {
-    console.debug(
-      `trying to upgrade db version from ${originalVersion} to ${DEFAULT_DB_VERSION_NUMBER}`
-    );
-    await migrateDBs(
-      db,
-      originalVersion,
-      DEFAULT_DB_VERSION_NUMBER,
-      vaultRandomID,
-      profileID
     );
   }
 
@@ -295,10 +121,6 @@ export const prepareDBs = async (
 };
 
 export const destroyDBs = async () => {
-  // await localforage.dropInstance({
-  //   name: DEFAULT_DB_NAME,
-  // });
-  // console.info("db deleted");
   const req = indexedDB.deleteDatabase(DEFAULT_DB_NAME);
   req.onsuccess = (event) => {
     console.info("db deleted");
@@ -312,56 +134,6 @@ export const destroyDBs = async () => {
   };
 };
 
-export const clearFileHistoryOfEverythingByVault = async (
-  db: InternalDBs,
-  vaultRandomID: string
-) => {
-  const keys = (await db.fileHistoryTbl.keys()).filter((x) =>
-    x.startsWith(`${vaultRandomID}\t`)
-  );
-  await db.fileHistoryTbl.removeItems(keys);
-  // for (const key of keys) {
-  //   if (key.startsWith(`${vaultRandomID}\t`)) {
-  //     await db.fileHistoryTbl.removeItem(key);
-  //   }
-  // }
-};
-
-/**
- * @deprecated But we cannot remove it. Because we want to migrate the old data.
- * @param db
- * @param vaultRandomID
- * @returns
- */
-export const getAllSyncMetaMappingByVault = async (
-  db: InternalDBs,
-  vaultRandomID: string
-) => {
-  return await Promise.all(
-    ((await db.syncMappingTbl.keys()) ?? [])
-      .filter((key) => key.startsWith(`${vaultRandomID}\t`))
-      .map(
-        async (key) =>
-          (await db.syncMappingTbl.getItem(key)) as SyncMetaMappingRecord
-      )
-  );
-};
-
-export const clearAllSyncMetaMappingByVault = async (
-  db: InternalDBs,
-  vaultRandomID: string
-) => {
-  const keys = (await db.syncMappingTbl.keys()).filter((x) =>
-    x.startsWith(`${vaultRandomID}\t`)
-  );
-  await db.syncMappingTbl.removeItems(keys);
-  // for (const key of keys) {
-  //   if (key.startsWith(`${vaultRandomID}\t`)) {
-  //     await db.syncMappingTbl.removeItem(key);
-  //   }
-  // }
-};
-
 export const insertSyncPlanRecordByVault = async (
   db: InternalDBs,
   syncPlan: SyncPlanType,
@@ -369,14 +141,31 @@ export const insertSyncPlanRecordByVault = async (
   remoteType: SUPPORTED_SERVICES_TYPE
 ) => {
   const now = Date.now();
-  const record = {
+  const record: SyncPlanRecord = {
     ts: now,
-    tsFmt: unixTimeToStr(now),
-    vaultRandomID: vaultRandomID,
-    remoteType: remoteType,
-    syncPlan: JSON.stringify(syncPlan /* directly stringify */, null, 2),
-  } as SyncPlanRecord;
+    vaultRandomID,
+    remoteType,
+    syncPlan: JSON.stringify(syncPlan),
+  };
   await db.syncPlansTbl.setItem(`${vaultRandomID}\t${now}`, record);
+
+  try {
+    const keys = (await db.syncPlansTbl.keys())
+      .filter((k) => k.startsWith(`${vaultRandomID}\t`))
+      .map((k) => ({
+        key: k,
+        ts: Number.parseInt(k.split("\t")[1], 10),
+      }))
+      .filter((x) => !Number.isNaN(x.ts))
+      .sort((a, b) => b.ts - a.ts);
+
+    if (keys.length > 20) {
+      const toRemove = keys.slice(20).map((x) => x.key);
+      await db.syncPlansTbl.removeItems(toRemove);
+    }
+  } catch (err) {
+    console.warn("CloudSync: Failed to prune sync plans history", err);
+  }
 };
 
 export const clearAllSyncPlanRecords = async (db: InternalDBs) => {
@@ -387,62 +176,42 @@ export const readAllSyncPlanRecordTextsByVault = async (
   db: InternalDBs,
   vaultRandomID: string
 ) => {
-  const records = [] as SyncPlanRecord[];
-  await db.syncPlansTbl.iterate((value, key, iterationNumber) => {
+  const records: SyncPlanRecord[] = [];
+  await db.syncPlansTbl.iterate((value, key) => {
     if (key.startsWith(`${vaultRandomID}\t`)) {
       records.push(value as SyncPlanRecord);
     }
   });
-  records.sort((a, b) => -(a.ts - b.ts)); // descending
-
-  if (records === undefined) {
-    return [] as string[];
-  } else {
-    return records.map((x) => x.syncPlan);
-  }
+  records.sort((a, b) => b.ts - a.ts);
+  return records.map((x) => x.syncPlan);
 };
 
-/**
- * We remove records that are older than 1 days or 20 records.
- * It's a heavy operation, so we shall not place it in the start up.
- * @param db
- */
 export const clearExpiredSyncPlanRecords = async (db: InternalDBs) => {
-  const MILLISECONDS_OLD = 1000 * 60 * 60 * 24 * 1; // 1 days
-  const COUNT_TO_MANY = 20;
+  const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+  const expiredTs = Date.now() - ONE_DAY_MS;
 
-  const currTs = Date.now();
-  const expiredTs = currTs - MILLISECONDS_OLD;
+  try {
+    const allKeys = await db.syncPlansTbl.keys();
+    const records = allKeys
+      .map((k) => ({
+        key: k,
+        ts: Number.parseInt(k.split("\t")[1], 10),
+      }))
+      .filter((x) => !Number.isNaN(x.ts));
 
-  let records = (await db.syncPlansTbl.keys()).map((key) => {
-    const ts = Number.parseInt(key.split("\t")[1]);
-    const expired = ts <= expiredTs;
-    return {
-      ts: ts,
-      key: key,
-      expired: expired,
-    };
-  });
+    const toRemove = new Set<string>();
+    for (const r of records) {
+      if (r.ts <= expiredTs) {
+        toRemove.add(r.key);
+      }
+    }
 
-  const keysToRemove = new Set(
-    records.filter((x) => x.expired).map((x) => x.key)
-  );
-
-  if (records.length - keysToRemove.size > COUNT_TO_MANY) {
-    // we need to find out records beyond 100 records
-    records = records.filter((x) => !x.expired); // shrink the array
-    records.sort((a, b) => -(a.ts - b.ts)); // descending
-    records.slice(COUNT_TO_MANY).forEach((element) => {
-      keysToRemove.add(element.key);
-    });
+    if (toRemove.size > 0) {
+      await db.syncPlansTbl.removeItems(Array.from(toRemove));
+    }
+  } catch (err) {
+    console.warn("CloudSync: Failed to clear expired sync plans", err);
   }
-
-  // const ps = [] as Promise<void>[];
-  // keysToRemove.forEach((element) => {
-  //   ps.push(db.syncPlansTbl.removeItem(element));
-  // });
-  // await Promise.all(ps);
-  await db.syncPlansTbl.removeItems(Array.from(keysToRemove));
 };
 
 export const getAllPrevSyncRecordsByVaultAndProfile = async (
@@ -476,6 +245,19 @@ export const upsertPrevSyncRecordByVaultAndProfile = async (
   );
 };
 
+export const getPrevSyncRecordByVaultAndProfile = async (
+  db: InternalDBs,
+  vaultRandomID: string,
+  profileID: string,
+  key: string
+): Promise<Entity | null> => {
+  return (
+    (await db.prevSyncRecordsTbl.getItem(
+      `${vaultRandomID}\t${profileID}\t${key}`
+    )) ?? null
+  );
+};
+
 export const clearPrevSyncRecordByVaultAndProfile = async (
   db: InternalDBs,
   vaultRandomID: string,
@@ -484,6 +266,29 @@ export const clearPrevSyncRecordByVaultAndProfile = async (
 ) => {
   await db.prevSyncRecordsTbl.removeItem(
     `${vaultRandomID}\t${profileID}\t${key}`
+  );
+};
+
+export const getLatestVaultRevision = async (
+  db: InternalDBs,
+  vaultRandomID: string,
+  profileID: string
+): Promise<number> => {
+  const res = (await db.simpleKVForMiscTbl.getItem(
+    `vault_rev_${vaultRandomID}_${profileID}`
+  )) as number | null;
+  return res ?? 0;
+};
+
+export const saveLatestVaultRevision = async (
+  db: InternalDBs,
+  vaultRandomID: string,
+  profileID: string,
+  rev: number
+): Promise<void> => {
+  await db.simpleKVForMiscTbl.setItem(
+    `vault_rev_${vaultRandomID}_${profileID}`,
+    rev
   );
 };
 
@@ -605,3 +410,4 @@ export const readAllProfilerResultsByVault = async (
     return records.map((x) => x.val);
   }
 };
+

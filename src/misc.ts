@@ -669,12 +669,14 @@ export const fixEntityListCasesInplace = (entities: { keyRaw: string }[]) => {
  * @returns bytes
  */
 export const roughSizeOfObject = (object: any) => {
-  const objectList: any[] = [];
+  if (object === null || object === undefined) return 0;
+  const seen = new Set();
   const stack = [object];
   let bytes = 0;
 
   while (stack.length) {
     const value = stack.pop();
+    if (value === null || value === undefined) continue;
 
     switch (typeof value) {
       case "boolean":
@@ -687,10 +689,10 @@ export const roughSizeOfObject = (object: any) => {
         bytes += 8;
         break;
       case "object":
-        if (!objectList.includes(value)) {
-          objectList.push(value);
+        if (!seen.has(value)) {
+          seen.add(value);
           for (const prop in value) {
-            if (value.hasOwnProperty(prop)) {
+            if (Object.prototype.hasOwnProperty.call(value, prop)) {
               stack.push(value[prop]);
             }
           }
