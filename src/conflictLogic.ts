@@ -1,179 +1,15 @@
-import isEqual from "lodash/isEqual";
-// import {
-//   makePatches,
-//   applyPatches,
-//   stringifyPatches,
-//   parsePatch,
-// } from "@sanity/diff-match-patch";
-import {
-  LCS,
-  diff3Merge,
-  diffComm,
-  diffPatch,
-  mergeDiff3,
-  mergeDigIn,
-  patch,
-} from "node-diff3";
-import type { Entity } from "../../src/baseTypes";
-import { copyFile } from "../../src/copyLogic";
-import type { FakeFs } from "../../src/fsAll";
-import { MERGABLE_SIZE } from "./baseTypesPro";
+import type { Entity } from "./baseTypes";
+import { copyFile } from "./copyLogic";
+import type { FakeFs } from "./fsAll";
 
-export function isMergable(a: Entity, b?: Entity) {
-  if (b !== undefined && a.key !== b.key) {
-    return false;
+export function arraysAreEqual(arr1: ArrayBuffer, arr2: ArrayBuffer): boolean {
+  if (arr1.byteLength !== arr2.byteLength) return false;
+  const u1 = new Uint8Array(arr1);
+  const u2 = new Uint8Array(arr2);
+  for (let i = 0; i < u1.byteLength; i++) {
+    if (u1[i] !== u2[i]) return false;
   }
-
-  return (
-    !a.key!.endsWith("/") &&
-    a.sizeRaw <= MERGABLE_SIZE &&
-    (a.key!.endsWith(".md") || a.key!.endsWith(".markdown"))
-  );
-}
-
-/**
- * slightly modify to adjust in markdown context
- * @param a
- * @param o
- * @param b
- */
-function mergeDigInModified(a: string, o: string, b: string) {
-  const { conflict, result } = mergeDigIn(a, o, b, {
-    stringSeparator: /\n/,
-  });
-  for (let index = 0; index < result.length; ++index) {
-    if (["<<<<<<<", "=======", ">>>>>>>"].includes(result[index])) {
-      result[index] = "`" + result[index] + "`";
-    }
-  }
-  return {
-    conflict,
-    result,
-  };
-}
-
-function getLCSText(a: string, b: string) {
-  const aa = a.split("\n");
-  const bb = b.split("\n");
-  let raw = LCS(aa, bb);
-
-  const k: string[] = [];
-
-  do {
-    k.unshift(aa[raw.buffer1index]);
-
-    raw = raw.chain as any;
-  } while (raw !== null && raw !== undefined && raw.buffer1index !== -1);
-
-  return k.join("\n");
-}
-
-/**
- * It's tricky. We find LCS then pretend it's the original text
- * @param a
- * @param b
- * @returns
- */
-export function twoWayMerge(a: string, b: string): string {
-  const aa = a.trim();
-  const bb = b.trim();
-  if (aa === "" && bb === "") {
-    return aa.length >= bb.length ? a : b;
-  }
-  if (bb === "") {
-    return a;
-  }
-  if (aa === "") {
-    return b;
-  }
-
-  // const c = getLCSText(a, b);
-  // const patches = makePatches(c, a);
-  // const [d] = applyPatches(patches, b);
-  const c = getLCSText(a, b); //.trim();
-  // console.debug(`(start) LCS Text:`);
-  // console.debug(c);
-  // console.debug(`(end) LCS Text.`);
-  const d = mergeDigInModified(a, c, b).result.join("\n");
-  return d;
-}
-
-/**
- * Originally three way merge.
- * @param a
- * @param b
- * @param orig
- * @returns
- */
-export function threeWayMerge(a: string, b: string, orig: string) {
-  return mergeDigInModified(a, orig, b).result.join("\n");
-}
-
-export async function mergeFile(
-  key: string,
-  left: FakeFs,
-  right: FakeFs,
-  contentOrig: ArrayBuffer | null | undefined
-) {
-  // console.debug(
-  //   `mergeFile: key=${key}, left=${left.kind}, right=${right.kind}`
-  // );
-  if (key.endsWith("/")) {
-    throw Error(`should not call ${key} in mergeFile`);
-  }
-
-  if (!key.endsWith(".md") && !key.endsWith(".markdown")) {
-    throw Error(`currently only support markdown files in mergeFile`);
-  }
-
-  const [contentLeft, contentRight] = await Promise.all([
-    left.readFile(key),
-    right.readFile(key),
-  ]);
-
-  let newArrayBuffer: ArrayBuffer | undefined = undefined;
-  const decoder = new TextDecoder("utf-8");
-
-  if (isEqual(contentLeft, contentRight)) {
-    // we are lucky enough
-    newArrayBuffer = contentLeft;
-    // TODO: save the write
-  } else {
-    if (contentOrig === null || contentOrig === undefined) {
-      const newText = twoWayMerge(
-        decoder.decode(contentLeft),
-        decoder.decode(contentRight)
-      );
-      // no need to worry about the offset here because the array is new and not sliced
-      newArrayBuffer = new TextEncoder().encode(newText).buffer;
-    } else {
-      const newText = threeWayMerge(
-        decoder.decode(contentLeft),
-        decoder.decode(contentRight),
-        decoder.decode(contentOrig)
-      );
-      newArrayBuffer = new TextEncoder().encode(newText).buffer;
-    }
-  }
-
-  const mtime = Date.now();
-
-  // left (local) must wait for the right
-  // because the mtime might be different after upload
-  // upload firstly
-  const rightEntity = await right.writeFile(key, newArrayBuffer, mtime, mtime);
-  // write local secondly
-  const leftEntity = await left.writeFile(
-    key,
-    newArrayBuffer,
-    rightEntity.mtimeCli ?? mtime,
-    rightEntity.ctimeCli ?? rightEntity.mtimeCli ?? mtime
-  );
-
-  return {
-    entity: rightEntity,
-    content: newArrayBuffer,
-  };
+  return true;
 }
 
 export function getFileRenameForDup(key: string) {
@@ -217,28 +53,6 @@ export function getFileRenameForDup(key: string) {
   return res;
 }
 
-function arraysAreEqual(arr1: ArrayBuffer, arr2: ArrayBuffer) {
-  if (arr1.byteLength !== arr2.byteLength) {
-    return false;
-  }
-  const u1 = new Uint8Array(arr1);
-  const u2 = new Uint8Array(arr2);
-
-  for (let i = 0; i < u1.byteLength; ++i) {
-    if (u1[i] !== u2[i]) {
-      return false;
-    }
-  }
-
-  return true;
-}
-
-/**
- * 1. download remote
- * 2. compare
- * 3. if the same, update local but not upload
- * 4. if not the same, rename local and save remote
- */
 async function tryDuplicateFileForSameSizes(
   key: string,
   key2: string,
@@ -249,11 +63,10 @@ async function tryDuplicateFileForSameSizes(
 ) {
   console.debug(`tryDuplicateFileForSameSizes: ${key}`);
 
-  // 1. download
-  const remoteContent = await fsRemote.readFile(key);
-
-  // 2. compare
-  const localContent = await fsLocal.readFile(key);
+  const [remoteContent, localContent] = await Promise.all([
+    fsRemote.readFile(key),
+    fsLocal.readFile(key),
+  ]);
   const eq = arraysAreEqual(localContent, remoteContent);
 
   if (eq) {
