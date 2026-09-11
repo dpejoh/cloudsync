@@ -1,0 +1,20 @@
+services:
+  cloudsync:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cloudsync-server:latest
+    container_name: cloudsync-server
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - HOST=0.0.0.0
+      - DATA_DIR=/data
+      - WORKER_MODE=multi # Options: "multi" (full user accounts + 2FA) or "single" (personal vault master password)
+      # - JWT_SECRET=change-this-to-a-secure-random-string # Optional: auto-generated and persisted in /data if omitted
+      # - SINGLE_USER_PASSWORD=your-secret-password # Required only if WORKER_MODE is "single"
+    volumes:
+      # Persistent SQLite DB, file versions, trash, and vault data
+      - ./data:/data
