@@ -1,0 +1,19 @@
+services:
+  cloudsync:
+    build:
+      context: ./worker
+      dockerfile: Dockerfile
+    image: cloudsync-server:latest
+    container_name: cloudsync-server
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - HOST=0.0.0.0
+      - DATA_DIR=/data
+      - WORKER_MODE=multi # Options: "multi" (accounts + 2FA) or "single" (single master password)
+      # - JWT_SECRET=change-this-to-a-secure-random-string # Optional (auto-generated in /data if omitted)
+      # - SINGLE_USER_PASSWORD=your-secret-password # Optional (if WORKER_MODE=single)
+    volumes:
+      - ./data:/data
