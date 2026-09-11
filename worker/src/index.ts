@@ -5,11 +5,13 @@ type Bindings = {
   CLOUDSYNC_BUCKET: R2Bucket;
   CLOUDSYNC_KV: KVNamespace;
   JWT_SECRET?: string;
+  WORKER_MODE?: string; // "single" | "multi"
+  SINGLE_USER_PASSWORD?: string;
 };
 
 type Variables = {
   userId: string;
-  email: string;
+  username: string;
 };
 
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
@@ -20,22 +22,60 @@ app.use(
   cors({
     origin: "*",
     allowMethods: ["GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS"],
-    allowHeaders: ["Authorization", "Content-Type", "x-mtime", "x-ctime", "x-vault-id"],
-    exposeHeaders: ["Content-Length", "x-mtime", "x-ctime", "ETag"],
+    allowHeaders: [
+      "Authorization",
+      "Content-Type",
+      "x-mtime",
+      "x-ctime",
+      "x-vault-id",
+      "x-cursor-line",
+      "x-cursor-ch",
+    ],
+    exposeHeaders: [
+      "Content-Length",
+      "x-mtime",
+      "x-ctime",
+      "x-cursor-line",
+      "x-cursor-ch",
+      "ETag",
+    ],
   })
 );
 
-// Health check
+// Health check and service info
 app.get("/", (c) => {
   return c.json({
     status: "ok",
     service: "CloudSync Edge Worker",
-    version: "1.0.0",
+    version: "2.0.0",
+    mode: c.env.WORKER_MODE === "single" ? "single" : "multi",
+  });
+});
+
+app.get("/api/info", async (c) => {
+  const mode = c.env.WORKER_MODE === "single" ? "single" : "multi";
+  let hasPassword = true;
+  if (mode === "single") {
+    if (c.env.SINGLE_USER_PASSWORD) {
+      hasPassword = true;
+    } else if (c.env.CLOUDSYNC_KV) {
+      const stored = await c.env.CLOUDSYNC_KV.get("single:verifier");
+      hasPassword = !!stored;
+    } else {
+      hasPassword = false;
+    }
+  }
+  return c.json({
+    status: "ok",
+    service: "CloudSync",
+    version: "2.0.0",
+    mode,
+    requiresSetup: mode === "single" && !hasPassword,
   });
 });
 
 // =============================================================================
-// JWT Web Crypto Helpers (HS256)
+// JWT & TOTP Web Crypto Helpers
 // =============================================================================
 function base64UrlEncode(str: string): string {
   return btoa(str).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
@@ -123,41 +163,165 @@ async function verifyJwt(
   }
 }
 
+// RFC 6238 Base32 & TOTP Verification Helpers
+function base32Decode(str: string): Uint8Array {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  const cleanStr = str.toUpperCase().replace(/=+$/, "").replace(/\s+/g, "");
+  let bits = 0;
+  let value = 0;
+  const output: number[] = [];
+
+  for (let i = 0; i < cleanStr.length; i++) {
+    const val = alphabet.indexOf(cleanStr[i]);
+    if (val === -1) continue;
+    value = (value << 5) | val;
+    bits += 5;
+    if (bits >= 8) {
+      output.push((value >>> (bits - 8)) & 255);
+      bits -= 8;
+    }
+  }
+  return new Uint8Array(output);
+}
+
+async function generateTotpCode(
+  secretBase32: string,
+  counter: number
+): Promise<string> {
+  const keyBytes = base32Decode(secretBase32);
+  const cryptoKey = await crypto.subtle.importKey(
+    "raw",
+    keyBytes as unknown as BufferSource,
+    { name: "HMAC", hash: "SHA-1" },
+    false,
+    ["sign"]
+  );
+
+  const counterBuffer = new ArrayBuffer(8);
+  const view = new DataView(counterBuffer);
+  view.setUint32(0, Math.floor(counter / 0x100000000));
+  view.setUint32(4, counter >>> 0);
+
+  const signature = await crypto.subtle.sign("HMAC", cryptoKey, counterBuffer);
+  const hash = new Uint8Array(signature);
+  const offset = hash[hash.length - 1] & 0x0f;
+  const binary =
+    ((hash[offset] & 0x7f) << 24) |
+    ((hash[offset + 1] & 0xff) << 16) |
+    ((hash[offset + 2] & 0xff) << 8) |
+    (hash[offset + 3] & 0xff);
+
+  return (binary % 1000000).toString().padStart(6, "0");
+}
+
+async function verifyTotpCode(
+  secretBase32: string,
+  userCode: string
+): Promise<boolean> {
+  const currentStep = Math.floor(Date.now() / 1000 / 30);
+  const cleanCode = userCode.trim();
+  for (let step = currentStep - 1; step <= currentStep + 1; step++) {
+    const validCode = await generateTotpCode(secretBase32, step);
+    if (validCode === cleanCode) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // =============================================================================
 // AUTH ROUTES
 // =============================================================================
 
-// Register a new user
-app.post("/api/auth/register", async (c) => {
-  const body = await c.req.json<{ email?: string; verifier?: string }>();
-  const email = (body.email || "").trim().toLowerCase();
+// 1. Single-User Mode Login / Unlock
+app.post("/api/auth/single-login", async (c) => {
+  const body = await c.req.json<{ verifier?: string }>();
   const verifier = (body.verifier || "").trim();
-
-  if (!email || !verifier) {
-    return c.json({ error: "Email and verifier are required." }, 400);
+  if (!verifier) {
+    return c.json({ error: "Password verifier is required." }, 400);
   }
 
-  // Check if user already exists
-  const existing = await c.env.CLOUDSYNC_KV.get(`user:${email}`);
+  const secret = c.env.JWT_SECRET || "cloudsync-secret-change-me";
+
+  if (c.env.CLOUDSYNC_KV) {
+    let stored = await c.env.CLOUDSYNC_KV.get("single:verifier");
+    if (!stored) {
+      // First setup: initialize single-user password verifier
+      await c.env.CLOUDSYNC_KV.put("single:verifier", verifier);
+      stored = verifier;
+    }
+    if (stored !== verifier) {
+      return c.json({ error: "Invalid master password." }, 401);
+    }
+  }
+
+  const token = await signJwt(
+    {
+      sub: "default",
+      username: "Owner",
+      exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 180, // 180 days
+    },
+    secret
+  );
+
+  return c.json({
+    ok: true,
+    token,
+    user: { id: "default", username: "Owner" },
+  });
+});
+
+// 2. Multi-User: Register a new user
+app.post("/api/auth/register", async (c) => {
+  const body = await c.req.json<{
+    username?: string;
+    verifier?: string;
+    recoveryVerifier?: string;
+    totpSecret?: string;
+  }>();
+
+  const username = (body.username || "").trim();
+  const verifier = (body.verifier || "").trim();
+  const recoveryVerifier = (body.recoveryVerifier || "").trim();
+  const totpSecret = (body.totpSecret || "").trim();
+
+  if (!username || !verifier) {
+    return c.json({ error: "Username and password verifier are required." }, 400);
+  }
+
+  if (username.length < 3 || !/^[a-zA-Z0-9_-]+$/.test(username)) {
+    return c.json(
+      {
+        error:
+          "Username must be at least 3 characters and contain only letters, numbers, hyphens, or underscores.",
+      },
+      400
+    );
+  }
+
+  const userKey = `user:${username.toLowerCase()}`;
+  const existing = await c.env.CLOUDSYNC_KV.get(userKey);
   if (existing) {
-    return c.json({ error: "User already exists with this email." }, 400);
+    return c.json({ error: "Username is already taken." }, 400);
   }
 
   const userId = crypto.randomUUID();
   const userData = {
     id: userId,
-    email,
+    username,
     verifier,
+    recoveryVerifier: recoveryVerifier || undefined,
+    totpSecret: totpSecret || undefined,
     createdAt: Date.now(),
   };
 
-  await c.env.CLOUDSYNC_KV.put(`user:${email}`, JSON.stringify(userData));
+  await c.env.CLOUDSYNC_KV.put(userKey, JSON.stringify(userData));
 
   const secret = c.env.JWT_SECRET || "cloudsync-secret-change-me";
   const token = await signJwt(
     {
       sub: userId,
-      email,
+      username,
       exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 90, // 90 days
     },
     secret
@@ -166,35 +330,57 @@ app.post("/api/auth/register", async (c) => {
   return c.json({
     ok: true,
     token,
-    user: { id: userId, email },
+    user: { id: userId, username },
   });
 });
 
-// Log In
+// 3. Multi-User: Log In with 2FA check
 app.post("/api/auth/login", async (c) => {
-  const body = await c.req.json<{ email?: string; verifier?: string }>();
-  const email = (body.email || "").trim().toLowerCase();
-  const verifier = (body.verifier || "").trim();
+  const body = await c.req.json<{
+    username?: string;
+    verifier?: string;
+    totpCode?: string;
+  }>();
 
-  if (!email || !verifier) {
-    return c.json({ error: "Email and verifier are required." }, 400);
+  const username = (body.username || "").trim();
+  const verifier = (body.verifier || "").trim();
+  const totpCode = (body.totpCode || "").trim();
+
+  if (!username || !verifier) {
+    return c.json({ error: "Username and password are required." }, 400);
   }
 
-  const raw = await c.env.CLOUDSYNC_KV.get(`user:${email}`);
+  const userKey = `user:${username.toLowerCase()}`;
+  const raw = await c.env.CLOUDSYNC_KV.get(userKey);
   if (!raw) {
-    return c.json({ error: "Invalid email or password." }, 401);
+    return c.json({ error: "Invalid username or password." }, 401);
   }
 
   const user = JSON.parse(raw);
   if (user.verifier !== verifier) {
-    return c.json({ error: "Invalid email or password." }, 401);
+    return c.json({ error: "Invalid username or password." }, 401);
+  }
+
+  // Check 2FA if enabled for this user
+  if (user.totpSecret) {
+    if (!totpCode) {
+      return c.json({
+        ok: false,
+        requires2FA: true,
+        message: "2FA authentication code required.",
+      });
+    }
+    const isValid = await verifyTotpCode(user.totpSecret, totpCode);
+    if (!isValid) {
+      return c.json({ error: "Invalid 2FA verification code." }, 401);
+    }
   }
 
   const secret = c.env.JWT_SECRET || "cloudsync-secret-change-me";
   const token = await signJwt(
     {
       sub: user.id,
-      email: user.email,
+      username: user.username,
       exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 90,
     },
     secret
@@ -203,7 +389,61 @@ app.post("/api/auth/login", async (c) => {
   return c.json({
     ok: true,
     token,
-    user: { id: user.id, email: user.email },
+    user: { id: user.id, username: user.username },
+  });
+});
+
+// 4. Multi-User: Recover Account / Reset Password via Recovery Key
+app.post("/api/auth/recover", async (c) => {
+  const body = await c.req.json<{
+    username?: string;
+    recoveryVerifier?: string;
+    newVerifier?: string;
+  }>();
+
+  const username = (body.username || "").trim();
+  const recoveryVerifier = (body.recoveryVerifier || "").trim();
+  const newVerifier = (body.newVerifier || "").trim();
+
+  if (!username || !recoveryVerifier || !newVerifier) {
+    return c.json(
+      {
+        error:
+          "Username, recovery code verifier, and new password verifier are required.",
+      },
+      400
+    );
+  }
+
+  const userKey = `user:${username.toLowerCase()}`;
+  const raw = await c.env.CLOUDSYNC_KV.get(userKey);
+  if (!raw) {
+    return c.json({ error: "User not found or invalid recovery key." }, 404);
+  }
+
+  const user = JSON.parse(raw);
+  if (!user.recoveryVerifier || user.recoveryVerifier !== recoveryVerifier) {
+    return c.json({ error: "Invalid recovery key." }, 401);
+  }
+
+  user.verifier = newVerifier;
+  await c.env.CLOUDSYNC_KV.put(userKey, JSON.stringify(user));
+
+  const secret = c.env.JWT_SECRET || "cloudsync-secret-change-me";
+  const token = await signJwt(
+    {
+      sub: user.id,
+      username: user.username,
+      exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 90,
+    },
+    secret
+  );
+
+  return c.json({
+    ok: true,
+    token,
+    user: { id: user.id, username: user.username },
+    message: "Password reset successfully.",
   });
 });
 
@@ -211,7 +451,10 @@ app.post("/api/auth/login", async (c) => {
 // AUTHENTICATION MIDDLEWARE FOR SYNC & USER API
 // =============================================================================
 app.use("/api/*", async (c, next) => {
-  if (c.req.path.startsWith("/api/auth/")) {
+  if (
+    c.req.path === "/api/info" ||
+    c.req.path.startsWith("/api/auth/")
+  ) {
     return next();
   }
 
@@ -229,7 +472,7 @@ app.use("/api/*", async (c, next) => {
   }
 
   c.set("userId", payload.sub);
-  c.set("email", payload.email);
+  c.set("username", payload.username || "User");
   await next();
 });
 
@@ -238,7 +481,7 @@ app.use("/api/*", async (c, next) => {
 // =============================================================================
 app.get("/api/user/me", async (c) => {
   const userId = c.get("userId");
-  const email = c.get("email");
+  const username = c.get("username");
 
   // Sum storage used in R2
   let storageUsedBytes = 0;
@@ -261,7 +504,7 @@ app.get("/api/user/me", async (c) => {
   return c.json({
     ok: true,
     userId,
-    email,
+    username,
     storageUsedBytes,
     quotaBytes: 10 * 1024 * 1024 * 1024, // 10 GB R2 free tier
   });
@@ -270,6 +513,52 @@ app.get("/api/user/me", async (c) => {
 // =============================================================================
 // SYNC API (FakeFs Remote Backend)
 // =============================================================================
+
+export interface VaultChange {
+  rev: number;
+  key: string;
+  action: "put" | "delete" | "cursor";
+  mtime: number;
+  size?: number;
+  cursor?: { line: number; ch: number };
+}
+
+async function recordVaultChange(
+  env: Bindings,
+  userId: string,
+  vault: string,
+  key: string,
+  action: "put" | "delete" | "cursor",
+  mtime: number,
+  size?: number,
+  cursor?: { line: number; ch: number }
+): Promise<number> {
+  const rev = Date.now();
+  const revKey = `vault_rev:${userId}:${vault}`;
+  const changesKey = `vault_changes:${userId}:${vault}`;
+
+  try {
+    const existingRaw = await env.CLOUDSYNC_KV.get(changesKey);
+    let changes: VaultChange[] = [];
+    if (existingRaw) {
+      try {
+        changes = JSON.parse(existingRaw);
+      } catch {}
+    }
+    changes.unshift({ rev, key, action, mtime, size, cursor });
+    if (changes.length > 100) {
+      changes = changes.slice(0, 100);
+    }
+    await Promise.all([
+      env.CLOUDSYNC_KV.put(revKey, `${rev}`),
+      env.CLOUDSYNC_KV.put(changesKey, JSON.stringify(changes)),
+    ]);
+  } catch (err) {
+    console.error("Failed to record vault change:", err);
+  }
+
+  return rev;
+}
 
 // List all files in vault (Walk)
 app.get("/api/sync/walk", async (c) => {
@@ -295,7 +584,7 @@ app.get("/api/sync/walk", async (c) => {
       prefix,
       cursor,
       limit: 1000,
-    });
+    } as any);
 
     for (const obj of list.objects) {
       const relKey = obj.key.slice(prefix.length);
@@ -318,7 +607,57 @@ app.get("/api/sync/walk", async (c) => {
     cursor = list.truncated ? list.cursor : undefined;
   }
 
-  return c.json({ ok: true, files });
+  const revKey = `vault_rev:${userId}:${vault}`;
+  const latestRevStr = await c.env.CLOUDSYNC_KV.get(revKey);
+  const latestRev = latestRevStr ? Number.parseInt(latestRevStr, 10) : 0;
+
+  return c.json({ ok: true, files, revision: latestRev });
+});
+
+// Real-Time Changes Feed (Fast invalidation / pull)
+app.get("/api/sync/changes", async (c) => {
+  const userId = c.get("userId");
+  const vault = c.req.query("vault") || "default";
+  const sinceStr = c.req.query("since");
+  const since = sinceStr ? Number.parseInt(sinceStr, 10) : 0;
+
+  const revKey = `vault_rev:${userId}:${vault}`;
+  const latestRevStr = await c.env.CLOUDSYNC_KV.get(revKey);
+  const latestRev = latestRevStr ? Number.parseInt(latestRevStr, 10) : 0;
+
+  if (since > 0 && latestRev <= since) {
+    return c.json({
+      ok: true,
+      revision: latestRev,
+      fullScanNeeded: false,
+      changes: [],
+    });
+  }
+
+  const changesKey = `vault_changes:${userId}:${vault}`;
+  const rawChanges = await c.env.CLOUDSYNC_KV.get(changesKey);
+  let allChanges: VaultChange[] = [];
+  if (rawChanges) {
+    try {
+      allChanges = JSON.parse(rawChanges);
+    } catch {}
+  }
+
+  const changes = since > 0
+    ? allChanges.filter((ch) => ch.rev > since)
+    : allChanges;
+
+  const oldestInRing =
+    allChanges.length > 0 ? allChanges[allChanges.length - 1].rev : 0;
+  const fullScanNeeded =
+    since > 0 && allChanges.length >= 100 && since < oldestInRing;
+
+  return c.json({
+    ok: true,
+    revision: latestRev,
+    fullScanNeeded,
+    changes,
+  });
 });
 
 // Get file content or metadata
@@ -405,13 +744,66 @@ app.put("/api/sync/file", async (c) => {
     httpMetadata: { contentType },
   });
 
+  const cursorLine = c.req.header("x-cursor-line");
+  const cursorCh = c.req.header("x-cursor-ch");
+  const cursor =
+    cursorLine !== undefined && cursorCh !== undefined
+      ? {
+          line: Number.parseInt(cursorLine, 10),
+          ch: Number.parseInt(cursorCh, 10),
+        }
+      : undefined;
+
+  const rev = await recordVaultChange(
+    c.env,
+    userId,
+    vault,
+    key,
+    "put",
+    Number.parseInt(mtime, 10),
+    body.byteLength,
+    cursor
+  );
+
   return c.json({
     ok: true,
     key,
     size: body.byteLength,
     mtime: Number.parseInt(mtime, 10),
     etag: obj?.httpEtag,
+    revision: rev,
   });
+});
+
+// Update cursor position only (ephemeral presence, zero R2 writes)
+app.put("/api/sync/cursor", async (c) => {
+  const userId = c.get("userId");
+  const vault = c.req.query("vault") || "default";
+  const key = c.req.query("key");
+  const lineStr = c.req.header("x-cursor-line");
+  const chStr = c.req.header("x-cursor-ch");
+
+  if (!key || lineStr === undefined || chStr === undefined) {
+    return c.json({ error: "Missing key or cursor coordinates" }, 400);
+  }
+
+  const cursor = {
+    line: Number.parseInt(lineStr, 10),
+    ch: Number.parseInt(chStr, 10),
+  };
+
+  const rev = await recordVaultChange(
+    c.env,
+    userId,
+    vault,
+    key,
+    "cursor",
+    Date.now(),
+    undefined,
+    cursor
+  );
+
+  return c.json({ ok: true, revision: rev });
 });
 
 // Delete file or folder
@@ -446,7 +838,16 @@ app.delete("/api/sync/file", async (c) => {
   }
 
   await c.env.CLOUDSYNC_BUCKET.delete(r2Key);
-  return c.json({ ok: true });
+  const rev = await recordVaultChange(
+    c.env,
+    userId,
+    vault,
+    key,
+    "delete",
+    Date.now()
+  );
+
+  return c.json({ ok: true, revision: rev });
 });
 
 // Rename file
@@ -474,7 +875,113 @@ app.post("/api/sync/rename", async (c) => {
   });
 
   await c.env.CLOUDSYNC_BUCKET.delete(sourceKey);
-  return c.json({ ok: true });
+
+  await recordVaultChange(c.env, userId, vault, body.from, "delete", Date.now());
+  const rev = await recordVaultChange(
+    c.env,
+    userId,
+    vault,
+    body.to,
+    "put",
+    Number.parseInt(sourceObj.customMetadata?.mtime || `${Date.now()}`, 10),
+    content.byteLength
+  );
+
+  return c.json({ ok: true, revision: rev });
+});
+
+// =============================================================================
+// DEVICE IDENTITY & SETTINGS BACKUP REGISTRY
+// =============================================================================
+
+export interface DeviceInfo {
+  deviceId: string;
+  deviceName: string;
+  platform: "desktop" | "mobile" | "unknown";
+  lastActive: number;
+  lastBackup?: number;
+  fileCount?: number;
+}
+
+// List all registered devices for this vault
+app.get("/api/sync/devices", async (c) => {
+  const userId = c.get("userId");
+  const vault = c.req.query("vault") || "default";
+  const devicesKey = `vault_devices:${userId}:${vault}`;
+
+  try {
+    const raw = await c.env.CLOUDSYNC_KV.get(devicesKey);
+    const devices: DeviceInfo[] = raw ? JSON.parse(raw) : [];
+    return c.json({ devices });
+  } catch (err: any) {
+    return c.json({ devices: [], error: err?.message });
+  }
+});
+
+// Register or update device heartbeat / backup metadata
+app.put("/api/sync/devices", async (c) => {
+  const userId = c.get("userId");
+  const vault = c.req.query("vault") || "default";
+  const devicesKey = `vault_devices:${userId}:${vault}`;
+
+  const body = await c.req.json().catch(() => null);
+  if (!body || !body.deviceId) {
+    return c.json({ error: "Missing deviceId" }, 400);
+  }
+
+  try {
+    const raw = await c.env.CLOUDSYNC_KV.get(devicesKey);
+    let devices: DeviceInfo[] = raw ? JSON.parse(raw) : [];
+    const index = devices.findIndex((d) => d.deviceId === body.deviceId);
+    const now = Date.now();
+    const updatedDevice: DeviceInfo = {
+      deviceId: body.deviceId,
+      deviceName: body.deviceName || "Unnamed Device",
+      platform: body.platform || "unknown",
+      lastActive: now,
+      lastBackup:
+        body.lastBackup !== undefined
+          ? body.lastBackup
+          : index >= 0
+          ? devices[index].lastBackup
+          : undefined,
+      fileCount:
+        body.fileCount !== undefined
+          ? body.fileCount
+          : index >= 0
+          ? devices[index].fileCount
+          : undefined,
+    };
+
+    if (index >= 0) {
+      devices[index] = { ...devices[index], ...updatedDevice };
+    } else {
+      devices.push(updatedDevice);
+    }
+
+    await c.env.CLOUDSYNC_KV.put(devicesKey, JSON.stringify(devices));
+    return c.json({ ok: true, device: updatedDevice });
+  } catch (err: any) {
+    return c.json({ error: err?.message }, 500);
+  }
+});
+
+// Unregister a device
+app.delete("/api/sync/devices/:deviceId", async (c) => {
+  const userId = c.get("userId");
+  const vault = c.req.query("vault") || "default";
+  const deviceId = c.req.param("deviceId");
+  const devicesKey = `vault_devices:${userId}:${vault}`;
+
+  try {
+    const raw = await c.env.CLOUDSYNC_KV.get(devicesKey);
+    let devices: DeviceInfo[] = raw ? JSON.parse(raw) : [];
+    devices = devices.filter((d) => d.deviceId !== deviceId);
+    await c.env.CLOUDSYNC_KV.put(devicesKey, JSON.stringify(devices));
+    return c.json({ ok: true });
+  } catch (err: any) {
+    return c.json({ error: err?.message }, 500);
+  }
 });
 
 export default app;
