@@ -219,12 +219,14 @@ export class FakeFsEncrypt extends FakeFs {
   }
 
   async stat(key: string): Promise<Entity> {
-    if (!this.hasCacheMap) {
-      throw new Error("You have to build the cacheMap firstly for stat");
-    }
-    const keyEnc = this.cacheMapOrigToEnc[key];
+    let keyEnc = this.cacheMapOrigToEnc[key];
     if (keyEnc === undefined) {
-      throw new Error(`no encrypted key ${key} before!`);
+      if (this.isPasswordEmpty()) {
+        keyEnc = key;
+      } else {
+        keyEnc = await this._encryptName(key);
+      }
+      this.cacheMapOrigToEnc[key] = keyEnc;
     }
 
     const innerEntity = await this.innerFs.stat(keyEnc);
@@ -247,10 +249,6 @@ export class FakeFsEncrypt extends FakeFs {
   }
 
   async mkdir(key: string, mtime?: number, ctime?: number): Promise<Entity> {
-    if (!this.hasCacheMap) {
-      throw new Error("You have to build the cacheMap firstly for mkdir");
-    }
-
     if (!key.endsWith("/")) {
       throw new Error(`should not call mkdir on ${key}`);
     }
@@ -299,11 +297,9 @@ export class FakeFsEncrypt extends FakeFs {
     key: string,
     content: ArrayBuffer,
     mtime: number,
-    ctime: number
+    ctime: number,
+    cursor?: { line: number; ch: number }
   ): Promise<Entity> {
-    if (!this.hasCacheMap) {
-      throw new Error("You have to build the cacheMap firstly for readFile");
-    }
     let keyEnc = this.cacheMapOrigToEnc[key];
     if (keyEnc === undefined) {
       if (this.isPasswordEmpty()) {
@@ -315,20 +311,22 @@ export class FakeFsEncrypt extends FakeFs {
     }
 
     if (this.isPasswordEmpty()) {
-      const innerEntity = await this.innerFs.writeFile(
+      const innerEntity = await (this.innerFs as any).writeFile(
         keyEnc,
         content,
         mtime,
-        ctime
+        ctime,
+        cursor
       );
       return copyEntityAndCopyKeyEncSizeEnc(innerEntity);
     } else {
-      const contentEnc = await this._encryptContent(content);
-      const innerEntity = await this.innerFs.writeFile(
+      const contentEnc = (await this._encryptContent(content)) as ArrayBuffer;
+      const innerEntity = await (this.innerFs as any).writeFile(
         keyEnc,
         contentEnc,
         mtime,
-        ctime
+        ctime,
+        cursor
       );
       return {
         key: key,
@@ -346,12 +344,14 @@ export class FakeFsEncrypt extends FakeFs {
   }
 
   async readFile(key: string): Promise<ArrayBuffer> {
-    if (!this.hasCacheMap) {
-      throw new Error("You have to build the cacheMap firstly for readFile");
-    }
-    const keyEnc = this.cacheMapOrigToEnc[key];
+    let keyEnc = this.cacheMapOrigToEnc[key];
     if (keyEnc === undefined) {
-      throw new Error(`no encrypted key ${key} before! cannot readFile`);
+      if (this.isPasswordEmpty()) {
+        keyEnc = key;
+      } else {
+        keyEnc = await this._encryptName(key);
+      }
+      this.cacheMapOrigToEnc[key] = keyEnc;
     }
 
     const contentEnc = await this.innerFs.readFile(keyEnc);
@@ -364,9 +364,6 @@ export class FakeFsEncrypt extends FakeFs {
   }
 
   async rename(key1: string, key2: string): Promise<void> {
-    if (!this.hasCacheMap) {
-      throw new Error("You have to build the cacheMap firstly for readFile");
-    }
     let key1Enc = this.cacheMapOrigToEnc[key1];
     if (key1Enc === undefined) {
       if (this.isPasswordEmpty()) {
@@ -389,14 +386,39 @@ export class FakeFsEncrypt extends FakeFs {
   }
 
   async rm(key: string): Promise<void> {
-    if (!this.hasCacheMap) {
-      throw new Error("You have to build the cacheMap firstly for rm");
-    }
-    const keyEnc = this.cacheMapOrigToEnc[key];
+    let keyEnc = this.cacheMapOrigToEnc[key];
     if (keyEnc === undefined) {
-      throw new Error(`no encrypted key ${key} before! cannot rm`);
+      if (this.isPasswordEmpty()) {
+        keyEnc = key;
+      } else {
+        keyEnc = await this._encryptName(key);
+      }
+      this.cacheMapOrigToEnc[key] = keyEnc;
     }
     return await this.innerFs.rm(keyEnc);
+  }
+
+  async decryptRemoteKey(encKey: string): Promise<string> {
+    if (this.isPasswordEmpty()) {
+      return encKey;
+    }
+    const plainKey = await this._decryptName(encKey);
+    this.cacheMapOrigToEnc[plainKey] = encKey;
+    return plainKey;
+  }
+
+  async updateCursor(
+    key: string,
+    cursor: { line: number; ch: number }
+  ): Promise<void> {
+    let keyEnc = this.cacheMapOrigToEnc[key];
+    if (keyEnc === undefined) {
+      keyEnc = this.isPasswordEmpty() ? key : await this._encryptName(key);
+      this.cacheMapOrigToEnc[key] = keyEnc;
+    }
+    if (typeof (this.innerFs as any).updateCursor === "function") {
+      await (this.innerFs as any).updateCursor(keyEnc, cursor);
+    }
   }
 
   async checkConnect(callbackFunc?: any): Promise<boolean> {
