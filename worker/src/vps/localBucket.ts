@@ -297,7 +297,12 @@ export class LocalDiskBucket {
         this.stmtDelete.run(key);
         const filePath = this.getFilePath(key);
         if (fs.existsSync(filePath)) {
-          await fs.promises.unlink(filePath);
+          const stat = await fs.promises.stat(filePath);
+          if (stat.isDirectory()) {
+            await fs.promises.rm(filePath, { recursive: true, force: true });
+          } else {
+            await fs.promises.unlink(filePath);
+          }
         }
       } catch (err) {
         console.error(`LocalBucket delete error for key "${key}":`, err);
