@@ -4,11 +4,14 @@ import { FileText, RefreshCcw, RotateCcw, createElement } from "lucide";
 import {
   Events,
   FileSystemAdapter,
+  Menu,
   Notice,
   Platform,
   Plugin,
+  TFile,
   TFolder,
   addIcon,
+  requestUrl,
   setIcon,
 } from "obsidian";
 import type {
@@ -16,11 +19,22 @@ import type {
   RemotelySavePluginSettings,
   SyncTriggerSourceType,
 } from "./baseTypes";
+import type { SyncLogEntry } from "./syncLogModal";
+import { SyncLogModal } from "./syncLogModal";
+import { DeletedFilesModal } from "./deletedFilesModal";
+import { VersionHistoryModal } from "./versionHistoryModal";
+import { VaultPickerModal } from "./vaultPickerModal";
 import {
   COMMAND_URI,
   DEFAULT_CLOUDSYNC_CONFIG,
   DEFAULT_DEBUG_FOLDER,
+  DEFAULT_DEVICE_CONFIGS_FOLDER,
 } from "./baseTypes";
+import {
+  initDeviceIdentity,
+  backupDeviceSettings,
+  restoreDeviceSettings,
+} from "./deviceSettings";
 import { messyConfigToNormal, normalConfigToMessy } from "./configPersist";
 import { exportVaultSyncPlansToFiles } from "./debugMode";
 import { fastPullChange, fastPushPath } from "./fastSync";
@@ -72,13 +86,29 @@ const DEFAULT_SETTINGS: RemotelySavePluginSettings = {
   enableStatusBarInfo: true,
   deleteToWhere: "system",
   agreeToUseSyncV3: true,
-  conflictAction: "smart_conflict",
+  conflictAction: "keep_newer",
   protectModifyPercentage: 50,
   syncDirection: "bidirectional",
   obfuscateSettingFile: true,
   enableMobileStatusBar: true,
   encryptionMethod: "rclone-base64",
   profiler: DEFAULT_PROFILER_CONFIG,
+  settingsSyncMode: "notes_only",
+  isSyncPaused: false,
+  syncImages: true,
+  syncAudio: false,
+  syncVideos: false,
+  syncPdfs: true,
+  syncUnsupported: false,
+  syncMainSettings: false,
+  syncAppearance: false,
+  syncAppearanceData: false,
+  syncHotkeys: false,
+  syncCorePlugins: false,
+  syncCorePluginData: false,
+  syncCommunityPlugins: false,
+  syncCommunityPluginData: false,
+  showSyncNotifications: false,
 };
 
 const iconNameSyncWait = `cloudsync-sync-wait`;
@@ -130,14 +160,40 @@ export default class CloudSyncPlugin extends Plugin {
   isFastSyncing = false;
   lastKnownRevision = 0;
 
+  lastLocalCursor: { path: string; line: number; ch: number } | null = null;
+  cursorDebounceTimer?: number;
+  isApplyingRemoteCursor = false;
+
+  syncLogs: SyncLogEntry[] = [];
+
+  addSyncLog(entry: {
+    type: "info" | "success" | "error" | "skipped" | "conflict";
+    message: string;
+    file?: string;
+  }) {
+    this.syncLogs.unshift({
+      id: Math.random().toString(36).slice(2),
+      timestamp: Date.now(),
+      type: entry.type,
+      message: entry.message,
+      file: entry.file,
+    });
+    if (this.syncLogs.length > 300) {
+      this.syncLogs.pop();
+    }
+  }
+
   getOrCreateClients() {
     const vaultName = this.app.vault.getName();
     const profileID = this.getCurrProfileID();
 
+    const syncConfigDir =
+      (this.settings.settingsSyncMode ?? "notes_only") === "shared";
+
     if (!this.cachedFsLocal) {
       this.cachedFsLocal = new FakeFsLocal(
         this.app.vault,
-        this.settings.syncConfigDir ?? false,
+        syncConfigDir,
         this.settings.syncBookmarks ?? false,
         this.app.vault.configDir,
         this.manifest.id,
@@ -179,15 +235,171 @@ export default class CloudSyncPlugin extends Plugin {
     };
   }
 
+  async autoRegisterDevice() {
+    if (!this.settings.cloudsync?.token) return;
+    initDeviceIdentity(this.settings);
+    const { fsRemote } = this.getOrCreateClients();
+    if (fsRemote && typeof (fsRemote as any).registerDevice === "function") {
+      try {
+        await fsRemote.registerDevice({
+          deviceId: this.settings.deviceId!,
+          deviceName: this.settings.deviceName!,
+          platform: Platform.isMobile ? "mobile" : "desktop",
+          lastBackup: this.settings.lastSettingsBackupTime,
+        });
+      } catch (err) {
+        console.debug("CloudSync: Device registration heartbeat skipped:", err);
+      }
+    }
+    await this.refreshUserProfile().catch(() => {});
+  }
+
+  async refreshUserProfile() {
+    const cs = this.settings.cloudsync;
+    if (!cs?.serverUrl || !cs?.token) return;
+    try {
+      const res = await requestUrl({
+        url: `${cs.serverUrl}/api/user/me`,
+        method: "GET",
+        headers: { Authorization: `Bearer ${cs.token}` },
+        throw: false,
+      });
+      if (res.status === 200 && res.json?.has2FA !== undefined) {
+        if (cs.has2FA !== res.json.has2FA) {
+          cs.has2FA = res.json.has2FA;
+          await this.saveSettings();
+        }
+      }
+    } catch {
+      // Ignore background check failure
+    }
+  }
+
+  openStatusIconMenu(e: MouseEvent) {
+    const menu = new Menu();
+
+    const hasVault = !!this.settings.cloudsync?.vaultId;
+    const statusText = !hasVault
+      ? "Not connected"
+      : this.isSyncing
+      ? "Syncing..."
+      : this.settings.isSyncPaused
+      ? "Paused"
+      : "Synced";
+
+    menu.addItem((item) => {
+      item.setTitle(`Sync: ${statusText}`).setDisabled(true);
+    });
+
+    menu.addSeparator();
+
+    const isPaused = this.settings.isSyncPaused ?? false;
+    menu.addItem((item) => {
+      item
+        .setTitle(isPaused ? "Resume" : "Pause")
+        .setIcon(isPaused ? "lucide-play-circle" : "lucide-pause-circle")
+        .setDisabled(!hasVault)
+        .onClick(async () => {
+          this.settings.isSyncPaused = !isPaused;
+          await this.saveSettings();
+          new Notice(
+            this.settings.isSyncPaused ? "CloudSync: Paused" : "CloudSync: Resumed"
+          );
+          if (!this.settings.isSyncPaused) {
+            this.syncRun("manual");
+          }
+        });
+    });
+
+    menu.addItem((item) => {
+      item
+        .setTitle("Sync now")
+        .setIcon("lucide-refresh-cw")
+        .setDisabled(!hasVault)
+        .onClick(async () => {
+          await this.syncRun("manual");
+        });
+    });
+
+    const activeFile = this.app.workspace.getActiveFile();
+    menu.addItem((item) => {
+      item
+        .setTitle("Version history")
+        .setIcon("lucide-history")
+        .setDisabled(!activeFile || !hasVault)
+        .onClick(() => {
+          if (activeFile) {
+            new VersionHistoryModal(this.app, this, activeFile.path).open();
+          }
+        });
+    });
+
+    menu.addSeparator();
+
+    menu.addItem((item) => {
+      item
+        .setTitle("Choose remote vault")
+        .setIcon("lucide-folder-sync")
+        .onClick(() => {
+          new VaultPickerModal(this.app, this).open();
+        });
+    });
+
+    menu.addItem((item) => {
+      item
+        .setTitle("Sync log")
+        .setIcon("lucide-align-left")
+        .onClick(() => {
+          new SyncLogModal(this.app, this).open();
+        });
+    });
+
+    menu.addItem((item) => {
+      item
+        .setTitle("Deleted files")
+        .setIcon("lucide-trash-2")
+        .setDisabled(!hasVault)
+        .onClick(() => {
+          new DeletedFilesModal(this.app, this, false).open();
+        });
+    });
+
+    menu.addItem((item) => {
+      item
+        .setTitle("Settings")
+        .setIcon("lucide-settings")
+        .onClick(() => {
+          (this.app as any).setting?.open?.();
+          (this.app as any).setting?.openTabById?.(this.manifest.id);
+        });
+    });
+
+    menu.showAtMouseEvent(e);
+  }
+
   async syncRun(triggerSource: SyncTriggerSourceType = "manual") {
     const t = (x: TransItemType, vars?: any) => {
       return this.i18n.t(x, vars);
     };
 
+    if (this.settings.isSyncPaused && triggerSource !== "manual") {
+      return;
+    }
+
     if (!this.settings.cloudsync.token) {
       new Notice("CloudSync: Please log in via settings to start syncing.");
       return;
     }
+
+    if (!this.settings.cloudsync.vaultId) {
+      new Notice("CloudSync: Please choose a remote vault in settings to start syncing.");
+      return;
+    }
+
+    this.addSyncLog({
+      type: "info",
+      message: `Sync started (${triggerSource})`,
+    });
 
     const { fsLocal, fsRemote, fsEncrypt, profileID } = this.getOrCreateClients();
 
@@ -205,6 +417,10 @@ export default class CloudSyncPlugin extends Plugin {
     };
 
     const errNotifyFunc = async (s: SyncTriggerSourceType, err: any) => {
+      this.addSyncLog({
+        type: "error",
+        message: `Sync error: ${err?.message || err}`,
+      });
       new Notice(`CloudSync Error: ${err?.message || err}`);
     };
 
@@ -250,6 +466,25 @@ export default class CloudSyncPlugin extends Plugin {
       decision: string
     ) => {
       this.setCurrSyncMsg(t, s, counter, total, path, decision, triggerSource);
+      if (decision.includes("push")) {
+        this.addSyncLog({
+          type: "success",
+          message: `Uploaded ${path}`,
+          file: path,
+        });
+      } else if (decision.includes("pull")) {
+        this.addSyncLog({
+          type: "success",
+          message: `Downloaded ${path}`,
+          file: path,
+        });
+      } else if (decision.includes("delete")) {
+        this.addSyncLog({
+          type: "info",
+          message: `Deleted ${path}`,
+          file: path,
+        });
+      }
     };
 
     if (this.isSyncing) {
@@ -283,6 +518,10 @@ export default class CloudSyncPlugin extends Plugin {
       );
     } catch (err: any) {
       console.error("CloudSync syncer error:", err);
+      this.addSyncLog({
+        type: "error",
+        message: `Sync failed: ${err?.message || err}`,
+      });
       new Notice(`CloudSync failed: ${err?.message || err}`);
     } finally {
       if (this.cachedFsRemote?.latestRevision) {
@@ -297,6 +536,11 @@ export default class CloudSyncPlugin extends Plugin {
           this.lastKnownRevision
         );
       }
+      await this.refreshUserProfile().catch(() => {});
+      this.addSyncLog({
+        type: "info",
+        message: "Sync completed.",
+      });
       this.syncEvent?.trigger("SYNC_DONE");
     }
   }
@@ -356,9 +600,74 @@ export default class CloudSyncPlugin extends Plugin {
       const statusBarItem = this.addStatusBarItem();
       this.statusBarElement = statusBarItem.createEl("span");
       this.statusBarElement.setText("CloudSync: Ready");
+      this.statusBarElement.addClass("mod-clickable");
+      statusBarItem.addClass("mod-clickable");
+      statusBarItem.addEventListener("click", (evt) => {
+        this.openStatusIconMenu(evt);
+      });
     }
 
+    // Context menu: File Explorer
+    this.registerEvent(
+      this.app.workspace.on("file-menu", (menu, file) => {
+        if (file instanceof TFile) {
+          menu.addItem((item) => {
+            item
+              .setTitle("Open version history")
+              .setIcon("lucide-history")
+              .setSection("view")
+              .onClick(() => {
+                new VersionHistoryModal(this.app, this, file.path).open();
+              });
+          });
+        }
+      })
+    );
+
+    // Context menu: Editor
+    this.registerEvent(
+      this.app.workspace.on("editor-menu", (menu, editor, view) => {
+        const file = view.file;
+        if (file instanceof TFile) {
+          menu.addItem((item) => {
+            item
+              .setTitle("Open version history")
+              .setIcon("lucide-history")
+              .setSection("view")
+              .onClick(() => {
+                new VersionHistoryModal(this.app, this, file.path).open();
+              });
+          });
+        }
+      })
+    );
+
     // Commands
+    this.addCommand({
+      id: "cloudsync-version-history",
+      name: "Open version history for current file",
+      icon: "lucide-history",
+      checkCallback: (checking) => {
+        const file = this.app.workspace.getActiveFile();
+        if (file) {
+          if (!checking) {
+            new VersionHistoryModal(this.app, this, file.path).open();
+          }
+          return true;
+        }
+        return false;
+      },
+    });
+
+    this.addCommand({
+      id: "cloudsync-choose-vault",
+      name: "Choose remote vault",
+      icon: "lucide-folder-sync",
+      callback: () => {
+        new VaultPickerModal(this.app, this).open();
+      },
+    });
+
     this.addCommand({
       id: "cloudsync-sync-now",
       name: "Sync Vault Now",
@@ -377,6 +686,30 @@ export default class CloudSyncPlugin extends Plugin {
       },
     });
 
+    this.addCommand({
+      id: "cloudsync-backup-device-settings",
+      name: "Backup Settings for This Device to Cloud",
+      callback: async () => {
+        const { fsEncrypt, fsRemote } = this.getOrCreateClients();
+        const notice = new Notice("CloudSync: Backing up device settings...", 0);
+        try {
+          const res = await backupDeviceSettings(
+            this.app,
+            fsEncrypt,
+            fsRemote as FakeFsWorker,
+            this.settings,
+            (msg) => notice.setMessage(`CloudSync: ${msg}`)
+          );
+          await this.saveSettings();
+          notice.hide();
+          new Notice(`CloudSync: Backed up ${res.fileCount} settings files to cloud.`);
+        } catch (err: any) {
+          notice.hide();
+          new Notice(`CloudSync: Failed to backup settings: ${err?.message || err}`);
+        }
+      },
+    });
+
     // Add settings tab
     this.addSettingTab(new CloudSyncSettingTab(this.app, this));
 
@@ -385,6 +718,9 @@ export default class CloudSyncPlugin extends Plugin {
 
     // Initialize real-time live pulse and change tracking
     await this.initRealtimeSync(profileID);
+
+    // Register device identity with cloud registry
+    await this.autoRegisterDevice();
 
     // Auto-sync intervals
     this.enableAutoSyncIfSet();
@@ -413,6 +749,9 @@ export default class CloudSyncPlugin extends Plugin {
     if (this.debouncePushTimer) {
       window.clearTimeout(this.debouncePushTimer);
     }
+    if (this.cursorDebounceTimer) {
+      window.clearTimeout(this.cursorDebounceTimer);
+    }
     if (this.cachedFsEncrypt) {
       this.cachedFsEncrypt.closeResources();
     }
@@ -432,6 +771,50 @@ export default class CloudSyncPlugin extends Plugin {
       }
     });
 
+    // Cursor movement listener (cross-device cursor sync)
+    const doc =
+      typeof activeDocument !== "undefined" ? activeDocument : window.document;
+    const handleCursorMove = () => {
+      if (
+        this.isSyncing ||
+        this.isFastSyncing ||
+        this.isApplyingRemoteCursor
+      ) {
+        return;
+      }
+      const leaves = this.app.workspace.getLeavesOfType("markdown");
+      if (leaves.length === 0) return;
+
+      const activeView = this.app.workspace.activeLeaf?.view as any;
+      if (!activeView || !activeView.file || !activeView.editor) return;
+
+      const cur = activeView.editor.getCursor();
+      const path = activeView.file.path;
+
+      if (this.shouldIgnorePath(path)) return;
+
+      if (
+        this.lastLocalCursor &&
+        this.lastLocalCursor.path === path &&
+        this.lastLocalCursor.line === cur.line &&
+        this.lastLocalCursor.ch === cur.ch
+      ) {
+        return;
+      }
+
+      this.lastLocalCursor = { path, line: cur.line, ch: cur.ch };
+
+      if (this.cursorDebounceTimer) {
+        window.clearTimeout(this.cursorDebounceTimer);
+      }
+      this.cursorDebounceTimer = window.setTimeout(async () => {
+        await this.sendCursorUpdate(path, cur);
+      }, 400);
+    };
+
+    this.registerDomEvent(doc, "keyup", handleCursorMove);
+    this.registerDomEvent(doc, "pointerup", handleCursorMove);
+
     // 2-second background live pulse
     this.livePulseIntervalID = window.setInterval(async () => {
       await this.runLivePulse();
@@ -442,7 +825,7 @@ export default class CloudSyncPlugin extends Plugin {
   async runLivePulse() {
     if (this.isSyncing || this.isFastSyncing) return;
     if (document.visibilityState !== "visible") return;
-    if (!this.settings.cloudsync?.token) return;
+    if (!this.settings.cloudsync?.token || !this.settings.cloudsync?.vaultId) return;
 
     const { fsRemote, profileID } = this.getOrCreateClients();
 
@@ -475,6 +858,41 @@ export default class CloudSyncPlugin extends Plugin {
     }
   }
 
+  applyRemoteCursor(path: string, cursor: { line: number; ch: number }) {
+    const leaves = this.app.workspace.getLeavesOfType("markdown");
+    const matchingLeaf = leaves.find(
+      (l: any) => (l.view as any).file?.path === path
+    );
+    if (matchingLeaf && (matchingLeaf.view as any).editor) {
+      this.isApplyingRemoteCursor = true;
+      const editor = (matchingLeaf.view as any).editor;
+      window.setTimeout(() => {
+        try {
+          editor.setCursor(cursor);
+          editor.scrollIntoView({ from: cursor, to: cursor });
+        } catch {}
+        window.setTimeout(() => {
+          this.isApplyingRemoteCursor = false;
+        }, 500);
+      }, 50);
+    }
+  }
+
+  async sendCursorUpdate(path: string, cursor: { line: number; ch: number }) {
+    if (this.isSyncing || this.isFastSyncing || this.isApplyingRemoteCursor) return;
+    if (!this.settings.cloudsync?.token || !this.settings.cloudsync?.vaultId) return;
+
+    const { fsRemote, fsEncrypt } = this.getOrCreateClients();
+    try {
+      await fsEncrypt.updateCursor(path, cursor);
+      if (fsRemote.latestRevision && fsRemote.latestRevision > this.lastKnownRevision) {
+        this.lastKnownRevision = fsRemote.latestRevision;
+      }
+    } catch {
+      // Ephemeral cursor update silently ignores network errors
+    }
+  }
+
   async runFastPull(changes: VaultChangeItem[]) {
     if (this.isSyncing || this.isFastSyncing) return;
     this.isFastSyncing = true;
@@ -489,7 +907,9 @@ export default class CloudSyncPlugin extends Plugin {
       let deleted = 0;
       for (const ch of changes) {
         const plainKey = await fsEncrypt.decryptRemoteKey(ch.key);
-        this.suppressLocalEvents.add(plainKey);
+        if (ch.action !== "cursor") {
+          this.suppressLocalEvents.add(plainKey);
+        }
 
         try {
           const res = await fastPullChange(
@@ -498,14 +918,22 @@ export default class CloudSyncPlugin extends Plugin {
             fsEncrypt,
             this.db,
             this.vaultRandomID,
-            profileID
+            profileID,
+            this.settings,
+            this.app.vault.configDir
           );
           if (res.action === "pulled") pulled++;
           if (res.action === "deleted") deleted++;
+
+          if (res.cursor) {
+            this.applyRemoteCursor(plainKey, res.cursor);
+          }
         } finally {
-          window.setTimeout(() => {
-            this.suppressLocalEvents.delete(plainKey);
-          }, 800);
+          if (ch.action !== "cursor") {
+            window.setTimeout(() => {
+              this.suppressLocalEvents.delete(plainKey);
+            }, 800);
+          }
         }
       }
 
@@ -513,7 +941,13 @@ export default class CloudSyncPlugin extends Plugin {
         this.statusBarElement.setText("CloudSync: Synced");
       }
       if (pulled > 0 || deleted > 0) {
-        new Notice(`CloudSync: Synced (${pulled} updated, ${deleted} deleted)`, 2000);
+        this.addSyncLog({
+          type: "info",
+          message: `Live sync: ${pulled} updated, ${deleted} deleted`,
+        });
+        if (this.settings.showSyncNotifications) {
+          new Notice(`CloudSync: Synced (${pulled} updated, ${deleted} deleted)`, 2000);
+        }
       }
     } catch (err: any) {
       console.error("CloudSync: Fast pull error, falling back to full sync:", err);
@@ -526,6 +960,18 @@ export default class CloudSyncPlugin extends Plugin {
   shouldIgnorePath(path: string): boolean {
     if (this.suppressLocalEvents.has(path)) return true;
     if (path.startsWith(DEFAULT_DEBUG_FOLDER)) return true;
+    if (path.startsWith(DEFAULT_DEVICE_CONFIGS_FOLDER)) return true;
+
+    const isNotesOnly =
+      (this.settings.settingsSyncMode ?? "notes_only") !== "shared";
+    if (
+      isNotesOnly &&
+      (path.startsWith(`${this.app.vault.configDir}/`) ||
+        path === this.app.vault.configDir)
+    ) {
+      return true;
+    }
+
     if (isHiddenPath(path, true, false)) return true;
     if (!this.settings.syncUnderscoreItems && isHiddenPath(path, false, true)) return true;
     if (isSpecialFolderNameToSkip(path, this.settings.ignorePaths ?? [])) return true;
@@ -534,7 +980,18 @@ export default class CloudSyncPlugin extends Plugin {
 
   onVaultModified(path: string) {
     if (this.isSyncing || this.isFastSyncing) return;
+    if (!this.settings.cloudsync?.token || !this.settings.cloudsync?.vaultId) return;
     if (this.shouldIgnorePath(path)) return;
+
+    // Capture cursor for active note
+    const leaves = this.app.workspace.getLeavesOfType("markdown");
+    const activeLeaf = leaves.find(
+      (l: any) => (l.view as any).file?.path === path
+    );
+    if (activeLeaf && (activeLeaf.view as any).editor) {
+      const cur = (activeLeaf.view as any).editor.getCursor();
+      this.lastLocalCursor = { path, line: cur.line, ch: cur.ch };
+    }
 
     this.pendingModifiedPaths.add(path);
     this.hasPendingSyncOnSave = true;
@@ -574,6 +1031,11 @@ export default class CloudSyncPlugin extends Plugin {
       }
 
       for (const p of paths) {
+        const cursor =
+          this.lastLocalCursor && this.lastLocalCursor.path === p
+            ? { line: this.lastLocalCursor.line, ch: this.lastLocalCursor.ch }
+            : undefined;
+
         await fastPushPath(
           p,
           fsLocal,
@@ -581,8 +1043,14 @@ export default class CloudSyncPlugin extends Plugin {
           this.db,
           this.vaultRandomID,
           profileID,
-          this.settings
+          this.settings,
+          cursor
         );
+        this.addSyncLog({
+          type: "success",
+          message: `Uploaded ${p}`,
+          file: p,
+        });
       }
 
       if (fsRemote.latestRevision && fsRemote.latestRevision > this.lastKnownRevision) {
@@ -616,6 +1084,18 @@ export default class CloudSyncPlugin extends Plugin {
     if (this.settings.cloudsync === undefined) {
       this.settings.cloudsync = cloneDeep(DEFAULT_CLOUDSYNC_CONFIG);
     }
+
+    // Auto-migrate away from smart_conflict: diff3 git markers corrupt notes and crash plugins like Dataview
+    if (
+      this.settings.conflictAction === "smart_conflict" ||
+      !this.settings.conflictAction
+    ) {
+      this.settings.conflictAction = "keep_newer";
+      await this.saveSettings();
+    }
+
+    // Auto-initialize device identity and settingsSyncMode
+    initDeviceIdentity(this.settings);
   }
 
   async saveSettings() {
@@ -627,10 +1107,17 @@ export default class CloudSyncPlugin extends Plugin {
   }
 
   getCurrProfileID(): string {
-    const email = (this.settings.cloudsync?.email || "").trim().toLowerCase();
+    const user = (
+      this.settings.cloudsync?.username ||
+      this.settings.cloudsync?.email ||
+      this.settings.cloudsync?.userId ||
+      ""
+    )
+      .trim()
+      .toLowerCase();
     const vaultId = (this.settings.cloudsync?.vaultId || "").trim();
-    if (!email) return "cloudsync-unauth";
-    return `cloudsync-${email}-${vaultId || "default"}`;
+    if (!user) return "cloudsync-unauth";
+    return `cloudsync-${user}-${vaultId || "default"}`;
   }
 
   getVaultBasePath(): string {

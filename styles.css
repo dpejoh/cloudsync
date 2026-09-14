@@ -220,3 +220,57 @@
   color: var(--text-muted);
 }
 
+
+/* Vault picker modal */
+.vault-picker-modal {
+  max-width: 600px;
+}
+
+.vault-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 380px;
+  overflow-y: auto;
+  margin-top: 12px;
+}
+
+.vault-name {
+  font-weight: 600;
+  color: var(--text-normal);
+}
+
+.badge-connected {
+  background-color: var(--interactive-accent);
+  color: var(--text-on-accent, #ffffff);
+  font-size: 11px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 12px;
+  margin-left: 8px;
+  display: inline-block;
+  vertical-align: middle;
+}
+
+.badge-shared {
+  background-color: var(--background-modifier-border);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 12px;
+  margin-left: 8px;
+  display: inline-block;
+  vertical-align: middle;
+}
+
+.loading-notice,
+.empty-notice {
+  padding: 24px 16px;
+  text-align: center;
+  color: var(--text-muted);
+  background-color: var(--background-secondary);
+  border-radius: var(--radius-m, 6px);
+  border: 1px dashed var(--background-modifier-border);
+  margin-top: 12px;
+}
