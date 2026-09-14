@@ -366,3 +366,15 @@
   min-width: 110px;
 }
 
+
+/* Shared lists (trash, excluded) */
+.deleted-files-list,
+.excluded-folders-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 16px 0;
+  max-height: 340px;
+  overflow-y: auto;
+}
+
