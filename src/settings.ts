@@ -9,7 +9,6 @@ import {
 import {
   deriveZeroKnowledgeKeys,
   deriveRecoveryVerifier,
-  generateRecoveryKey,
 } from "./authHelper";
 import { OBSIDIAN_LOGO_PNG } from "./assets/logo";
 import {
@@ -23,6 +22,7 @@ import {
   restoreDeviceSettings,
 } from "./deviceSettings";
 import { FakeFsWorker, type DeviceInfo } from "./fsWorker";
+import { TwoFactorModal } from "./twoFactorModal";
 import type CloudSyncPlugin from "./main";
 
 export class CloudSyncSettingTab extends PluginSettingTab {
@@ -39,7 +39,6 @@ export class CloudSyncSettingTab extends PluginSettingTab {
   private passwordInput = "";
   private totpCodeInput = "";
   private recoveryKeyInput = "";
-  private generatedRecoveryKey = "";
 
   private errorMessage: string | null = null;
   private isLoading = false;
@@ -427,41 +426,7 @@ export class CloudSyncSettingTab extends PluginSettingTab {
         };
       }
 
-      // If in registration mode: display generated Recovery Key
-      if (this.isRegisterMode) {
-        if (!this.generatedRecoveryKey) {
-          this.generatedRecoveryKey = generateRecoveryKey();
-        }
-
-        const recGroup = form.createDiv({ cls: "cloudsync-input-group" });
-        recGroup.createEl("label", {
-          text: "Account Recovery Key",
-          cls: "cloudsync-input-label",
-        });
-
-        const recBox = recGroup.createDiv({ cls: "cloudsync-recovery-box" });
-        recBox.createSpan({
-          cls: "cloudsync-recovery-code",
-          text: this.generatedRecoveryKey,
-        });
-
-        const copyBtn = recBox.createEl("button", {
-          cls: "mod-sm",
-          text: "Copy",
-        });
-        copyBtn.onclick = async (e) => {
-          e.preventDefault();
-          await navigator.clipboard.writeText(this.generatedRecoveryKey);
-          copyBtn.setText("Copied!");
-          setTimeout(() => copyBtn.setText("Copy"), 2000);
-        };
-
-        recGroup.createEl("p", {
-          cls: "cloudsync-hint",
-          text: "Save this key in a password manager. If you forget your password, this recovery key is required to restore access.",
-        });
-      }
-
+      // Submit Button (Frictionless: Username + Password only!)
       const submitBtn = form.createEl("button", {
         cls: "mod-cta cloudsync-primary-btn",
         text: this.isLoading
@@ -484,7 +449,6 @@ export class CloudSyncSettingTab extends PluginSettingTab {
         switchLink.onclick = () => {
           this.isRegisterMode = true;
           this.errorMessage = null;
-          this.generatedRecoveryKey = generateRecoveryKey();
           this.display();
         };
       } else {
@@ -596,10 +560,6 @@ export class CloudSyncSettingTab extends PluginSettingTab {
       );
 
       if (this.isRegisterMode) {
-        const recoveryVerifier = await deriveRecoveryVerifier(
-          this.generatedRecoveryKey
-        );
-
         const res = await requestUrl({
           url: `${cs.serverUrl}/api/auth/register`,
           method: "POST",
@@ -607,7 +567,6 @@ export class CloudSyncSettingTab extends PluginSettingTab {
           body: JSON.stringify({
             username: this.usernameInput,
             verifier: authVerifier,
-            recoveryVerifier,
           }),
           throw: false,
         });
@@ -622,18 +581,22 @@ export class CloudSyncSettingTab extends PluginSettingTab {
         cs.token = res.json.token;
         cs.userId = res.json.user?.id || "";
         cs.username = this.usernameInput;
-        cs.recoveryKey = this.generatedRecoveryKey;
         cs.vaultId = this.app.vault.getName();
         cs.encryptionKey = encryptionKey;
+        cs.has2FA = false;
         this.plugin.settings.password = encryptionKey;
         this.plugin.settings.encryptionMethod = "rclone-base64";
 
         await this.plugin.saveSettings();
         await this.plugin.autoRegisterDevice();
 
-        new Notice("CloudSync account created successfully!");
         this.isLoading = false;
-        this.display();
+        new Notice("CloudSync account created!");
+
+        // Open 2FA setup prompt immediately as requested!
+        new TwoFactorModal(this.app, this.plugin, "prompt", () => {
+          this.display();
+        }).open();
       } else {
         const res = await requestUrl({
           url: `${cs.serverUrl}/api/auth/login`,
@@ -753,6 +716,24 @@ export class CloudSyncSettingTab extends PluginSettingTab {
   private async renderLoggedInView(containerEl: HTMLElement) {
     const cs = this.plugin.settings.cloudsync;
 
+    // SECTION 0: 2FA REMINDER BANNER (If multi-user mode and 2FA not set up)
+    if (cs.mode === "multi" && !cs.has2FA) {
+      new Setting(containerEl)
+        .setClass("cloudsync-2fa-banner")
+        .setName("Two-factor authentication is not enabled")
+        .setDesc("Protect your account from unauthorized access and enable verification.")
+        .addButton((btn) => {
+          btn
+            .setButtonText("Set up 2FA")
+            .setCta()
+            .onClick(() => {
+              new TwoFactorModal(this.app, this.plugin, "setup", (success) => {
+                if (success) this.display();
+              }).open();
+            });
+        });
+    }
+
     // SECTION 1: ACCOUNT
     containerEl.createEl("h3", { text: "Account" });
 
@@ -778,6 +759,63 @@ export class CloudSyncSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Signed in as")
       .setDesc(cs.username || (cs.mode === "single" ? "Personal Worker" : "User"));
+
+    // Two-factor authentication row in account
+    if (cs.mode === "multi") {
+      new Setting(containerEl)
+        .setName("Two-factor authentication")
+        .setDesc(cs.has2FA ? "Enabled (Authenticator app)" : "Not enabled")
+        .addButton((btn) => {
+          if (cs.has2FA) {
+            btn.setButtonText("Disable").onClick(async () => {
+              if (
+                !confirm(
+                  "Are you sure you want to disable two-factor authentication for your account?"
+                )
+              ) {
+                return;
+              }
+              btn.setDisabled(true);
+              btn.setButtonText("Disabling...");
+              try {
+                const res = await requestUrl({
+                  url: `${cs.serverUrl}/api/user/disable-2fa`,
+                  method: "POST",
+                  headers: {
+                    Authorization: `Bearer ${cs.token}`,
+                    "Content-Type": "application/json",
+                  },
+                  body: JSON.stringify({}),
+                  throw: false,
+                });
+                if (res.status === 200) {
+                  cs.has2FA = false;
+                  await this.plugin.saveSettings();
+                  new Notice("Two-factor authentication disabled.");
+                  this.display();
+                } else {
+                  btn.setDisabled(false);
+                  btn.setButtonText("Disable");
+                  new Notice("Failed to disable 2FA.");
+                }
+              } catch (err: any) {
+                btn.setDisabled(false);
+                btn.setButtonText("Disable");
+                new Notice(`Error: ${err?.message || err}`);
+              }
+            });
+          } else {
+            btn
+              .setButtonText("Set up")
+              .setCta()
+              .onClick(() => {
+                new TwoFactorModal(this.app, this.plugin, "setup", (success) => {
+                  if (success) this.display();
+                }).open();
+              });
+          }
+        });
+    }
 
     // Storage usage
     await this.fetchStorageUsage();
@@ -1124,8 +1162,13 @@ export class CloudSyncSettingTab extends PluginSettingTab {
         throw: false,
       });
 
-      if (res.status === 200 && res.json?.storageUsedBytes !== undefined) {
-        this.storageUsedBytes = res.json.storageUsedBytes;
+      if (res.status === 200) {
+        if (res.json?.storageUsedBytes !== undefined) {
+          this.storageUsedBytes = res.json.storageUsedBytes;
+        }
+        if (res.json?.has2FA !== undefined) {
+          cs.has2FA = res.json.has2FA;
+        }
       }
     } catch {
       // Ignore background storage check failure
