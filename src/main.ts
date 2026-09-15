@@ -4,14 +4,11 @@ import { FileText, RefreshCcw, RotateCcw, createElement } from "lucide";
 import {
   Events,
   FileSystemAdapter,
-  Menu,
   Notice,
   Platform,
   Plugin,
-  TFile,
   TFolder,
   addIcon,
-  requestUrl,
   setIcon,
 } from "obsidian";
 import type {
@@ -20,10 +17,6 @@ import type {
   SyncTriggerSourceType,
 } from "./baseTypes";
 import type { SyncLogEntry } from "./syncLogModal";
-import { SyncLogModal } from "./syncLogModal";
-import { DeletedFilesModal } from "./deletedFilesModal";
-import { VersionHistoryModal } from "./versionHistoryModal";
-import { VaultPickerModal } from "./vaultPickerModal";
 import {
   COMMAND_URI,
   DEFAULT_CLOUDSYNC_CONFIG,
@@ -108,7 +101,6 @@ const DEFAULT_SETTINGS: RemotelySavePluginSettings = {
   syncCorePluginData: false,
   syncCommunityPlugins: false,
   syncCommunityPluginData: false,
-  showSyncNotifications: false,
 };
 
 const iconNameSyncWait = `cloudsync-sync-wait`;
@@ -251,130 +243,6 @@ export default class CloudSyncPlugin extends Plugin {
         console.debug("CloudSync: Device registration heartbeat skipped:", err);
       }
     }
-    await this.refreshUserProfile().catch(() => {});
-  }
-
-  async refreshUserProfile() {
-    const cs = this.settings.cloudsync;
-    if (!cs?.serverUrl || !cs?.token) return;
-    try {
-      const res = await requestUrl({
-        url: `${cs.serverUrl}/api/user/me`,
-        method: "GET",
-        headers: { Authorization: `Bearer ${cs.token}` },
-        throw: false,
-      });
-      if (res.status === 200 && res.json?.has2FA !== undefined) {
-        if (cs.has2FA !== res.json.has2FA) {
-          cs.has2FA = res.json.has2FA;
-          await this.saveSettings();
-        }
-      }
-    } catch {
-      // Ignore background check failure
-    }
-  }
-
-  openStatusIconMenu(e: MouseEvent) {
-    const menu = new Menu();
-
-    const hasVault = !!this.settings.cloudsync?.vaultId;
-    const statusText = !hasVault
-      ? "Not connected"
-      : this.isSyncing
-      ? "Syncing..."
-      : this.settings.isSyncPaused
-      ? "Paused"
-      : "Synced";
-
-    menu.addItem((item) => {
-      item.setTitle(`Sync: ${statusText}`).setDisabled(true);
-    });
-
-    menu.addSeparator();
-
-    const isPaused = this.settings.isSyncPaused ?? false;
-    menu.addItem((item) => {
-      item
-        .setTitle(isPaused ? "Resume" : "Pause")
-        .setIcon(isPaused ? "lucide-play-circle" : "lucide-pause-circle")
-        .setDisabled(!hasVault)
-        .onClick(async () => {
-          this.settings.isSyncPaused = !isPaused;
-          await this.saveSettings();
-          new Notice(
-            this.settings.isSyncPaused ? "CloudSync: Paused" : "CloudSync: Resumed"
-          );
-          if (!this.settings.isSyncPaused) {
-            this.syncRun("manual");
-          }
-        });
-    });
-
-    menu.addItem((item) => {
-      item
-        .setTitle("Sync now")
-        .setIcon("lucide-refresh-cw")
-        .setDisabled(!hasVault)
-        .onClick(async () => {
-          await this.syncRun("manual");
-        });
-    });
-
-    const activeFile = this.app.workspace.getActiveFile();
-    menu.addItem((item) => {
-      item
-        .setTitle("Version history")
-        .setIcon("lucide-history")
-        .setDisabled(!activeFile || !hasVault)
-        .onClick(() => {
-          if (activeFile) {
-            new VersionHistoryModal(this.app, this, activeFile.path).open();
-          }
-        });
-    });
-
-    menu.addSeparator();
-
-    menu.addItem((item) => {
-      item
-        .setTitle("Choose remote vault")
-        .setIcon("lucide-folder-sync")
-        .onClick(() => {
-          new VaultPickerModal(this.app, this).open();
-        });
-    });
-
-    menu.addItem((item) => {
-      item
-        .setTitle("Sync log")
-        .setIcon("lucide-align-left")
-        .onClick(() => {
-          new SyncLogModal(this.app, this).open();
-        });
-    });
-
-    menu.addItem((item) => {
-      item
-        .setTitle("Deleted files")
-        .setIcon("lucide-trash-2")
-        .setDisabled(!hasVault)
-        .onClick(() => {
-          new DeletedFilesModal(this.app, this, false).open();
-        });
-    });
-
-    menu.addItem((item) => {
-      item
-        .setTitle("Settings")
-        .setIcon("lucide-settings")
-        .onClick(() => {
-          (this.app as any).setting?.open?.();
-          (this.app as any).setting?.openTabById?.(this.manifest.id);
-        });
-    });
-
-    menu.showAtMouseEvent(e);
   }
 
   async syncRun(triggerSource: SyncTriggerSourceType = "manual") {
@@ -388,11 +256,6 @@ export default class CloudSyncPlugin extends Plugin {
 
     if (!this.settings.cloudsync.token) {
       new Notice("CloudSync: Please log in via settings to start syncing.");
-      return;
-    }
-
-    if (!this.settings.cloudsync.vaultId) {
-      new Notice("CloudSync: Please choose a remote vault in settings to start syncing.");
       return;
     }
 
@@ -536,7 +399,6 @@ export default class CloudSyncPlugin extends Plugin {
           this.lastKnownRevision
         );
       }
-      await this.refreshUserProfile().catch(() => {});
       this.addSyncLog({
         type: "info",
         message: "Sync completed.",
@@ -600,74 +462,9 @@ export default class CloudSyncPlugin extends Plugin {
       const statusBarItem = this.addStatusBarItem();
       this.statusBarElement = statusBarItem.createEl("span");
       this.statusBarElement.setText("CloudSync: Ready");
-      this.statusBarElement.addClass("mod-clickable");
-      statusBarItem.addClass("mod-clickable");
-      statusBarItem.addEventListener("click", (evt) => {
-        this.openStatusIconMenu(evt);
-      });
     }
 
-    // Context menu: File Explorer
-    this.registerEvent(
-      this.app.workspace.on("file-menu", (menu, file) => {
-        if (file instanceof TFile) {
-          menu.addItem((item) => {
-            item
-              .setTitle("Open version history")
-              .setIcon("lucide-history")
-              .setSection("view")
-              .onClick(() => {
-                new VersionHistoryModal(this.app, this, file.path).open();
-              });
-          });
-        }
-      })
-    );
-
-    // Context menu: Editor
-    this.registerEvent(
-      this.app.workspace.on("editor-menu", (menu, editor, view) => {
-        const file = view.file;
-        if (file instanceof TFile) {
-          menu.addItem((item) => {
-            item
-              .setTitle("Open version history")
-              .setIcon("lucide-history")
-              .setSection("view")
-              .onClick(() => {
-                new VersionHistoryModal(this.app, this, file.path).open();
-              });
-          });
-        }
-      })
-    );
-
     // Commands
-    this.addCommand({
-      id: "cloudsync-version-history",
-      name: "Open version history for current file",
-      icon: "lucide-history",
-      checkCallback: (checking) => {
-        const file = this.app.workspace.getActiveFile();
-        if (file) {
-          if (!checking) {
-            new VersionHistoryModal(this.app, this, file.path).open();
-          }
-          return true;
-        }
-        return false;
-      },
-    });
-
-    this.addCommand({
-      id: "cloudsync-choose-vault",
-      name: "Choose remote vault",
-      icon: "lucide-folder-sync",
-      callback: () => {
-        new VaultPickerModal(this.app, this).open();
-      },
-    });
-
     this.addCommand({
       id: "cloudsync-sync-now",
       name: "Sync Vault Now",
@@ -825,7 +622,7 @@ export default class CloudSyncPlugin extends Plugin {
   async runLivePulse() {
     if (this.isSyncing || this.isFastSyncing) return;
     if (document.visibilityState !== "visible") return;
-    if (!this.settings.cloudsync?.token || !this.settings.cloudsync?.vaultId) return;
+    if (!this.settings.cloudsync?.token) return;
 
     const { fsRemote, profileID } = this.getOrCreateClients();
 
@@ -880,7 +677,7 @@ export default class CloudSyncPlugin extends Plugin {
 
   async sendCursorUpdate(path: string, cursor: { line: number; ch: number }) {
     if (this.isSyncing || this.isFastSyncing || this.isApplyingRemoteCursor) return;
-    if (!this.settings.cloudsync?.token || !this.settings.cloudsync?.vaultId) return;
+    if (!this.settings.cloudsync?.token) return;
 
     const { fsRemote, fsEncrypt } = this.getOrCreateClients();
     try {
@@ -941,13 +738,7 @@ export default class CloudSyncPlugin extends Plugin {
         this.statusBarElement.setText("CloudSync: Synced");
       }
       if (pulled > 0 || deleted > 0) {
-        this.addSyncLog({
-          type: "info",
-          message: `Live sync: ${pulled} updated, ${deleted} deleted`,
-        });
-        if (this.settings.showSyncNotifications) {
-          new Notice(`CloudSync: Synced (${pulled} updated, ${deleted} deleted)`, 2000);
-        }
+        new Notice(`CloudSync: Synced (${pulled} updated, ${deleted} deleted)`, 2000);
       }
     } catch (err: any) {
       console.error("CloudSync: Fast pull error, falling back to full sync:", err);
@@ -980,7 +771,6 @@ export default class CloudSyncPlugin extends Plugin {
 
   onVaultModified(path: string) {
     if (this.isSyncing || this.isFastSyncing) return;
-    if (!this.settings.cloudsync?.token || !this.settings.cloudsync?.vaultId) return;
     if (this.shouldIgnorePath(path)) return;
 
     // Capture cursor for active note
@@ -1046,11 +836,6 @@ export default class CloudSyncPlugin extends Plugin {
           this.settings,
           cursor
         );
-        this.addSyncLog({
-          type: "success",
-          message: `Uploaded ${p}`,
-          file: p,
-        });
       }
 
       if (fsRemote.latestRevision && fsRemote.latestRevision > this.lastKnownRevision) {

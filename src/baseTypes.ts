@@ -6,10 +6,14 @@ export type SUPPORTED_SERVICES_TYPE = "cloudsync";
 
 export interface CloudSyncConfig {
   serverUrl: string;
-  email: string;
+  username: string;
+  email?: string; // backwards compatibility
   token: string;
   vaultId: string;
   userId: string;
+  mode?: "single" | "multi";
+  has2FA?: boolean;
+  recoveryKey?: string;
   encryptionKey?: string;
   autoSyncIntervalMinutes?: number;
   syncOnStartup?: boolean;
@@ -18,10 +22,12 @@ export interface CloudSyncConfig {
 
 export const DEFAULT_CLOUDSYNC_CONFIG: CloudSyncConfig = {
   serverUrl: "",
+  username: "",
   email: "",
   token: "",
   vaultId: "",
   userId: "",
+  mode: "multi",
   encryptionKey: "",
   autoSyncIntervalMinutes: 5,
   syncOnStartup: true,
@@ -68,12 +74,36 @@ export interface RemotelySavePluginSettings {
   conflictAction?: ConflictActionType;
 
   protectModifyPercentage?: number;
+  safetyDeletionThreshold?: number;
   syncDirection?: SyncDirectionType;
 
   obfuscateSettingFile?: boolean;
   enableMobileStatusBar?: boolean;
   encryptionMethod?: CipherMethodType;
   profiler?: ProfilerConfig;
+
+  // Settings sync & device isolation
+  settingsSyncMode?: SettingsSyncMode;
+  deviceId?: string;
+  deviceName?: string;
+  lastSettingsBackupTime?: number;
+
+  // Official Obsidian Sync Replica Options
+  isSyncPaused?: boolean;
+  syncImages?: boolean;
+  syncAudio?: boolean;
+  syncVideos?: boolean;
+  syncPdfs?: boolean;
+  syncUnsupported?: boolean;
+  syncMainSettings?: boolean;
+  syncAppearance?: boolean;
+  syncAppearanceData?: boolean;
+  syncHotkeys?: boolean;
+  syncCorePlugins?: boolean;
+  syncCorePluginData?: boolean;
+  syncCommunityPlugins?: boolean;
+  syncCommunityPluginData?: boolean;
+  showSyncNotifications?: boolean;
 }
 
 export const COMMAND_URI = "cloudsync";
@@ -94,6 +124,8 @@ export type ConflictActionType =
   | "keep_newer"
   | "keep_larger"
   | "smart_conflict";
+
+export type SettingsSyncMode = "notes_only" | "device_isolated" | "shared";
 
 export type DecisionTypeForMixedEntity =
   | "only_history"
@@ -166,6 +198,7 @@ export interface MixedEntity {
 }
 
 export const DEFAULT_DEBUG_FOLDER = "_debug_cloudsync/";
+export const DEFAULT_DEVICE_CONFIGS_FOLDER = "_device_configs/";
 export const DEFAULT_SYNC_PLANS_HISTORY_FILE_PREFIX =
   "sync_plans_hist_exported_on_";
 export const DEFAULT_LOG_HISTORY_FILE_PREFIX = "log_hist_exported_on_";
