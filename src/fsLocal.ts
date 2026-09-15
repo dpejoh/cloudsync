@@ -1,8 +1,12 @@
-import { DEFAULT_DEBUG_FOLDER, type Entity } from "./baseTypes";
+import {
+  DEFAULT_DEBUG_FOLDER,
+  DEFAULT_DEVICE_CONFIGS_FOLDER,
+  type Entity,
+} from "./baseTypes";
 import { FakeFs } from "./fsAll";
 
 import { TFile, TFolder, type Vault } from "obsidian";
-import { mkdirpInVault, statFix, unixTimeToStr } from "./misc";
+import { getParentFolder, mkdirpInVault, statFix, unixTimeToStr } from "./misc";
 import { listFilesInObsFolder } from "./obsFolderLister";
 import type { Profiler } from "./profiler";
 
@@ -88,10 +92,11 @@ export class FakeFsLocal extends FakeFs {
         throw Error(`unexpected ${entry}`);
       }
 
-      if (r.keyRaw.startsWith(DEFAULT_DEBUG_FOLDER)) {
-        // skip listing the debug folder,
-        // which should always not involved in sync
-        // continue;
+      if (
+        r.keyRaw.startsWith(DEFAULT_DEBUG_FOLDER) ||
+        r.keyRaw.startsWith(DEFAULT_DEVICE_CONFIGS_FOLDER)
+      ) {
+        // skip listing debug or device configs folder
       } else {
         local.push(r);
       }
@@ -156,6 +161,10 @@ export class FakeFsLocal extends FakeFs {
     mtime: number,
     ctime: number
   ): Promise<Entity> {
+    const parent = getParentFolder(key);
+    if (parent && parent !== "") {
+      await mkdirpInVault(parent, this.vault);
+    }
     await this.vault.adapter.writeBinary(key, content, {
       mtime: mtime,
       ctime: ctime,
