@@ -3,7 +3,7 @@ import { cors } from "hono/cors";
 
 type Bindings = {
   CLOUDSYNC_BUCKET: R2Bucket;
-  CLOUDSYNC_KV: KVNamespace;
+  CLOUDSYNC_KV?: KVNamespace;
   JWT_SECRET?: string;
   WORKER_MODE?: string; // "single" | "multi"
   SINGLE_USER_PASSWORD?: string;
@@ -14,19 +14,42 @@ type Variables = {
   username: string;
 };
 
+interface VaultChange {
+  rev: number;
+  key: string;
+  action: "put" | "delete" | "cursor";
+  mtime: number;
+  size?: number;
+  cursor?: { line: number; ch: number };
+}
+
+interface DeviceInfo {
+  deviceId: string;
+  deviceName: string;
+  platform: "desktop" | "mobile" | "unknown";
+  lastActive: number;
+  lastBackup?: number;
+  fileCount?: number;
+}
+
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
-// 1. Strict OWASP Security Response Headers
+// In-memory caches for ephemeral cursor updates and storage calculations
+const cursorCache = new Map<string, { key: string; cursor: { line: number; ch: number }; rev: number }>();
+const storageCache = new Map<string, { bytes: number; timestamp: number }>();
+
 app.use("*", async (c, next) => {
   await next();
   c.header("X-Content-Type-Options", "nosniff");
   c.header("X-Frame-Options", "DENY");
-  c.header("Strict-Transport-Security", "max-age=31536000; includeSubDomains; preload");
   c.header("Referrer-Policy", "no-referrer");
-  c.header("X-XSS-Protection", "1; mode=block");
 });
 
-// 2. Enable CORS for Obsidian desktop, mobile, and web clients
+app.onError((err, c) => {
+  console.error("Worker unhandled error:", err);
+  return c.json({ error: err.message || "Internal server error", stack: err.stack }, 500);
+});
+
 app.use(
   "*",
   cors({
@@ -48,29 +71,312 @@ app.use(
       "x-cursor-line",
       "x-cursor-ch",
       "ETag",
-      "Retry-After",
     ],
   })
 );
 
-// 3. Payload size guards for auth and user endpoints (max 16KB)
-app.use("/api/auth/*", async (c, next) => {
-  const cl = c.req.header("content-length");
-  if (cl && Number.parseInt(cl, 10) > 16384) {
-    return c.json({ error: "Payload too large." }, 413);
-  }
-  await next();
-});
+// Helpers
+function base64UrlEncode(str: string): string {
+  return btoa(str).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
 
-app.use("/api/user/*", async (c, next) => {
-  const cl = c.req.header("content-length");
-  if (cl && Number.parseInt(cl, 10) > 16384) {
-    return c.json({ error: "Payload too large." }, 413);
-  }
-  await next();
-});
+function base64UrlEncodeBytes(bytes: Uint8Array): string {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return base64UrlEncode(binary);
+}
 
-// Health check and service info
+function base64UrlDecode(str: string): string {
+  str = str.replace(/-/g, "+").replace(/_/g, "/");
+  while (str.length % 4) str += "=";
+  return atob(str);
+}
+
+function base32Decode(str: string): Uint8Array {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  const clean = str.toUpperCase().replace(/=+$/, "").replace(/\s+/g, "");
+  let bits = 0;
+  let value = 0;
+  const out: number[] = [];
+
+  for (let i = 0; i < clean.length; i++) {
+    const val = alphabet.indexOf(clean[i]);
+    if (val === -1) continue;
+    value = (value << 5) | val;
+    bits += 5;
+    if (bits >= 8) {
+      out.push((value >>> (bits - 8)) & 255);
+      bits -= 8;
+    }
+  }
+  return new Uint8Array(out);
+}
+
+async function signJwt(payload: Record<string, any>, secret: string): Promise<string> {
+  const enc = new TextEncoder();
+  const header = base64UrlEncode(JSON.stringify({ alg: "HS256", typ: "JWT" }));
+  const body = base64UrlEncode(JSON.stringify(payload));
+  const data = `${header}.${body}`;
+
+  const key = await crypto.subtle.importKey(
+    "raw",
+    enc.encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+
+  const sig = await crypto.subtle.sign("HMAC", key, enc.encode(data));
+  return `${data}.${base64UrlEncodeBytes(new Uint8Array(sig))}`;
+}
+
+async function verifyJwt(token: string, secret: string): Promise<Record<string, any> | null> {
+  try {
+    const parts = token.split(".");
+    if (parts.length !== 3) return null;
+
+    const [headerB64, payloadB64, sigB64] = parts;
+    const enc = new TextEncoder();
+    const key = await crypto.subtle.importKey(
+      "raw",
+      enc.encode(secret),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["verify"]
+    );
+
+    const sigStr = base64UrlDecode(sigB64);
+    const sigBytes = new Uint8Array(sigStr.length);
+    for (let i = 0; i < sigStr.length; i++) sigBytes[i] = sigStr.charCodeAt(i);
+
+    const valid = await crypto.subtle.verify("HMAC", key, sigBytes, enc.encode(`${headerB64}.${payloadB64}`));
+    if (!valid) return null;
+
+    const payload = JSON.parse(base64UrlDecode(payloadB64));
+    if (payload.exp && Date.now() / 1000 > payload.exp) return null;
+
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+async function hashVerifier(verifier: string, secret: string): Promise<string> {
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    "raw",
+    enc.encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const sig = await crypto.subtle.sign("HMAC", key, enc.encode(verifier.toLowerCase()));
+  const bytes = new Uint8Array(sig);
+  let hex = "";
+  for (let i = 0; i < bytes.length; i++) hex += bytes[i].toString(16).padStart(2, "0");
+  return hex;
+}
+
+async function verifyTotpCode(secretBase32: string, code: string): Promise<boolean> {
+  const currentStep = Math.floor(Date.now() / 1000 / 30);
+  const cleanCode = code.trim();
+  const keyBytes = base32Decode(secretBase32);
+
+  const cryptoKey = await crypto.subtle.importKey(
+    "raw",
+    keyBytes as unknown as BufferSource,
+    { name: "HMAC", hash: "SHA-1" },
+    false,
+    ["sign"]
+  );
+
+  for (let offset = -1; offset <= 1; offset++) {
+    const step = currentStep + offset;
+    const buf = new ArrayBuffer(8);
+    const view = new DataView(buf);
+    view.setUint32(0, Math.floor(step / 0x100000000));
+    view.setUint32(4, step >>> 0);
+
+    const sig = await crypto.subtle.sign("HMAC", cryptoKey, buf);
+    const hash = new Uint8Array(sig);
+    const idx = hash[hash.length - 1] & 0x0f;
+    const binary =
+      ((hash[idx] & 0x7f) << 24) |
+      ((hash[idx + 1] & 0xff) << 16) |
+      ((hash[idx + 2] & 0xff) << 8) |
+      (hash[idx + 3] & 0xff);
+
+    const expected = (binary % 1000000).toString().padStart(6, "0");
+    if (expected === cleanCode) return true;
+  }
+  return false;
+}
+
+function isValidUsername(s: string): boolean {
+  return typeof s === "string" && /^[a-zA-Z0-9_-]{3,32}$/.test(s);
+}
+
+function isValidHexHash(s: string): boolean {
+  return typeof s === "string" && /^[a-fA-F0-9]{64}$/.test(s);
+}
+
+function isValidTotpSecret(s: string): boolean {
+  return typeof s === "string" && /^[A-Z2-7]{16,64}$/.test(s);
+}
+
+function isValidTotpCode(s: string): boolean {
+  return typeof s === "string" && /^\d{6}$/.test(s);
+}
+
+function isValidVaultName(s: string): boolean {
+  return typeof s === "string" && /^[a-zA-Z0-9._-]{1,64}$/.test(s);
+}
+
+function isValidFileKey(key: string): boolean {
+  if (!key || typeof key !== "string" || key.length > 1024) return false;
+  if (key.startsWith("/") || key.includes("\\")) return false;
+  if (/(^|[/\\])\.\.([/\\]|$)/.test(key)) return false;
+  return true;
+}
+
+function toStorageKey(key: string): string {
+  return `_system_store/${key.replace(/[^a-zA-Z0-9._-]/g, "_")}.json`;
+}
+
+async function getStoredData(c: any, key: string): Promise<string | null> {
+  if (c.env.CLOUDSYNC_KV) {
+    try {
+      const val = await c.env.CLOUDSYNC_KV.get(key);
+      if (val !== null && val !== undefined) return val;
+    } catch (e) {
+      console.warn("KV get failed, falling back to bucket:", e);
+    }
+  }
+  if (c.env.CLOUDSYNC_BUCKET) {
+    try {
+      const obj = await c.env.CLOUDSYNC_BUCKET.get(toStorageKey(key));
+      if (obj) {
+        return await obj.text();
+      }
+    } catch (e) {
+      console.warn("Bucket get failed for system key:", e);
+    }
+  }
+  return null;
+}
+
+async function putStoredData(c: any, key: string, value: string): Promise<void> {
+  if (c.env.CLOUDSYNC_BUCKET) {
+    try {
+      await c.env.CLOUDSYNC_BUCKET.put(toStorageKey(key), value, {
+        httpMetadata: { contentType: "application/json" },
+      });
+    } catch (e) {
+      console.error("Bucket put failed for system key:", e);
+    }
+  }
+  if (c.env.CLOUDSYNC_KV) {
+    try {
+      await c.env.CLOUDSYNC_KV.put(key, value);
+    } catch (e) {
+      console.warn("KV put quota limit exceeded, securely using R2 storage:", e);
+    }
+  }
+}
+
+async function deleteStoredData(c: any, key: string): Promise<void> {
+  if (c.env.CLOUDSYNC_BUCKET) {
+    try {
+      await c.env.CLOUDSYNC_BUCKET.delete(toStorageKey(key));
+    } catch {}
+  }
+  if (c.env.CLOUDSYNC_KV) {
+    try {
+      await c.env.CLOUDSYNC_KV.delete(key);
+    } catch {}
+  }
+}
+
+let lastAssignedRev = 0;
+function getNextRevision(): number {
+  const now = Date.now();
+  lastAssignedRev = now > lastAssignedRev ? now : lastAssignedRev + 1;
+  return lastAssignedRev;
+}
+
+const authRateLimitMap = new Map<string, { count: number; resetTime: number }>();
+function checkAuthRateLimit(clientIp: string, limit = 20, windowMs = 60_000): boolean {
+  const now = Date.now();
+  const record = authRateLimitMap.get(clientIp);
+  if (!record || now > record.resetTime) {
+    authRateLimitMap.set(clientIp, { count: 1, resetTime: now + windowMs });
+    return true;
+  }
+  if (record.count >= limit) return false;
+  record.count += 1;
+  return true;
+}
+
+async function recordVaultChange(
+  env: Bindings,
+  userId: string,
+  vault: string,
+  key: string,
+  action: "put" | "delete" | "cursor",
+  mtime: number,
+  size?: number,
+  cursor?: { line: number; ch: number }
+): Promise<number> {
+  const rev = getNextRevision();
+  const vaultKey = `${userId}:${vault}`;
+
+  // Keep cursor presence in memory to avoid storage writes
+  if (action === "cursor" && cursor) {
+    cursorCache.set(vaultKey, { key, cursor, rev });
+    return rev;
+  }
+  if (cursor) {
+    cursorCache.set(vaultKey, { key, cursor, rev });
+  }
+
+  const metaKey = `users/${userId}/vaults/${vault}/.cloudsync_meta.json`;
+
+  try {
+    let meta: { revision: number; changes: VaultChange[] } = {
+      revision: rev,
+      changes: [],
+    };
+
+    const existing = await env.CLOUDSYNC_BUCKET.get(metaKey);
+    if (existing) {
+      try {
+        const parsed = (await existing.json()) as any;
+        if (parsed?.changes && Array.isArray(parsed.changes)) {
+          meta.changes = parsed.changes;
+        }
+      } catch {}
+    }
+
+    meta.revision = rev;
+    meta.changes.unshift({ rev, key, action, mtime, size, cursor });
+    if (meta.changes.length > 100) {
+      meta.changes = meta.changes.slice(0, 100);
+    }
+
+    await env.CLOUDSYNC_BUCKET.put(metaKey, JSON.stringify(meta), {
+      httpMetadata: { contentType: "application/json" },
+      customMetadata: { revision: `${rev}` },
+    });
+
+    storageCache.delete(userId);
+  } catch (err) {
+    console.error("Failed to record vault change:", err);
+  }
+
+  return rev;
+}
+
+// Info & health
 app.get("/", (c) => {
   return c.json({
     status: "ok",
@@ -86,11 +392,9 @@ app.get("/api/info", async (c) => {
   if (mode === "single") {
     if (c.env.SINGLE_USER_PASSWORD) {
       hasPassword = true;
-    } else if (c.env.CLOUDSYNC_KV) {
-      const stored = await c.env.CLOUDSYNC_KV.get("single:verifier");
-      hasPassword = !!stored;
     } else {
-      hasPassword = false;
+      const stored = await getStoredData(c, "single:verifier");
+      hasPassword = !!stored;
     }
   }
   return c.json({
@@ -102,383 +406,11 @@ app.get("/api/info", async (c) => {
   });
 });
 
-// =============================================================================
-// CRYPTOGRAPHIC & SECURITY UTILITIES
-// =============================================================================
-
-/**
- * Constant-Time String Equality Comparison
- * Prevents side-channel timing attacks by checking every byte without early exit.
- */
-export function timingSafeEqual(a: string, b: string): boolean {
-  const enc = new TextEncoder();
-  const aBytes = enc.encode(a);
-  const bBytes = enc.encode(b);
-  const maxLen = Math.max(aBytes.length, bBytes.length);
-  let diff = aBytes.length ^ bBytes.length;
-
-  for (let i = 0; i < maxLen; i++) {
-    const byteA = i < aBytes.length ? aBytes[i] : 0;
-    const byteB = i < bBytes.length ? bBytes[i] : 0;
-    diff |= byteA ^ byteB;
-  }
-
-  return diff === 0;
-}
-
-/**
- * Server-Side HMAC-SHA256 Pepper
- * Double-hashes client-derived PBKDF2 verifiers with the worker's secret key.
- * Guarantees that even if KV is leaked, offline dictionary attacks cannot crack passwords.
- */
-export async function pepperVerifier(verifier: string, secret: string): Promise<string> {
-  const enc = new TextEncoder();
-  const key = await crypto.subtle.importKey(
-    "raw",
-    enc.encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"]
-  );
-  const sig = await crypto.subtle.sign(
-    "HMAC",
-    key,
-    enc.encode(`cloudsync-pepper:${verifier.toLowerCase()}`)
-  );
-  const bytes = new Uint8Array(sig);
-  let hex = "";
-  for (let i = 0; i < bytes.length; i++) {
-    hex += bytes[i].toString(16).padStart(2, "0");
-  }
-  return `v2:${hex}`;
-}
-
-/**
- * Verifies a stored verifier against an incoming candidate.
- * Handles transparent zero-downtime migration from legacy unpeppered hashes to v2 peppered hashes.
- */
-export async function verifyPasswordVerifier(
-  stored: string,
-  incoming: string,
-  secret: string
-): Promise<{ valid: boolean; needsUpgrade: boolean }> {
-  if (stored.startsWith("v2:")) {
-    const expected = await pepperVerifier(incoming, secret);
-    return { valid: timingSafeEqual(stored, expected), needsUpgrade: false };
-  } else {
-    // Legacy verifier (raw PBKDF2 hash)
-    const match = timingSafeEqual(stored.toLowerCase(), incoming.toLowerCase());
-    return { valid: match, needsUpgrade: match };
-  }
-}
-
-/**
- * Dummy operation to equalize execution time when an account does not exist.
- * Completely eliminates timing-based username enumeration.
- */
-export async function dummyTimingEqual(incoming: string, secret: string): Promise<void> {
-  await pepperVerifier(incoming, secret);
-  timingSafeEqual(
-    "v2:0000000000000000000000000000000000000000000000000000000000000000",
-    "v2:1111111111111111111111111111111111111111111111111111111111111111"
-  );
-}
-
-// =============================================================================
-// EDGE RATE LIMITING (Sliding Window in KV)
-// =============================================================================
-
-function getClientIp(c: any): string {
-  const cfIp = c.req.header("cf-connecting-ip");
-  if (cfIp) return cfIp.trim();
-  const realIp = c.req.header("x-real-ip");
-  if (realIp) return realIp.trim();
-  const fwd = c.req.header("x-forwarded-for");
-  if (fwd) return fwd.split(",")[0].trim();
-  return "127.0.0.1";
-}
-
-interface RateLimitResult {
-  allowed: boolean;
-  retryAfterSeconds?: number;
-}
-
-async function checkRateLimit(
-  kv: KVNamespace | undefined,
-  prefix: string,
-  maxAttempts: number,
-  windowSeconds: number
-): Promise<RateLimitResult> {
-  if (!kv) return { allowed: true };
-  const key = `rl:${prefix}`;
-  const raw = await kv.get(key);
-  if (!raw) return { allowed: true };
-
-  try {
-    const data = JSON.parse(raw);
-    if (data.count >= maxAttempts) {
-      const elapsed = Math.floor((Date.now() - (data.firstAt || Date.now())) / 1000);
-      const retryAfter = Math.max(1, windowSeconds - elapsed);
-      return { allowed: false, retryAfterSeconds: retryAfter };
-    }
-  } catch {}
-
-  return { allowed: true };
-}
-
-async function recordFailedAttempt(
-  kv: KVNamespace | undefined,
-  prefix: string,
-  windowSeconds: number
-): Promise<void> {
-  if (!kv) return;
-  const key = `rl:${prefix}`;
-  const raw = await kv.get(key);
-  const now = Date.now();
-  let count = 1;
-  let firstAt = now;
-
-  if (raw) {
-    try {
-      const data = JSON.parse(raw);
-      count = (data.count || 0) + 1;
-      firstAt = data.firstAt || now;
-    } catch {}
-  }
-
-  await kv.put(
-    key,
-    JSON.stringify({ count, firstAt }),
-    { expirationTtl: windowSeconds }
-  );
-}
-
-async function resetRateLimit(
-  kv: KVNamespace | undefined,
-  prefix: string
-): Promise<void> {
-  if (!kv) return;
-  await kv.delete(`rl:${prefix}`);
-}
-
-// =============================================================================
-// INPUT VALIDATION & SANITIZATION
-// =============================================================================
-
-function isValidUsername(username: string): boolean {
-  return typeof username === "string" && /^[a-zA-Z0-9_-]{3,32}$/.test(username);
-}
-
-function isValidHexHash(hash: string): boolean {
-  return typeof hash === "string" && /^[a-fA-F0-9]{64}$/.test(hash);
-}
-
-function isValidTotpSecret(secret: string): boolean {
-  return typeof secret === "string" && /^[A-Z2-7]{16,64}$/.test(secret);
-}
-
-function isValidTotpCode(code: string): boolean {
-  return typeof code === "string" && /^\d{6}$/.test(code);
-}
-
-function isValidVaultName(vault: string): boolean {
-  return typeof vault === "string" && /^[a-zA-Z0-9._-]{1,64}$/.test(vault);
-}
-
-function isValidFileKey(key: string): boolean {
-  if (!key || typeof key !== "string" || key.length > 1024) return false;
-  if (key.startsWith("/") || key.includes("\\")) return false;
-  // Block directory traversal segments like '../', '/../', or trailing '/..'
-  if (/(^|[/\\])\.\.([/\\]|$)/.test(key)) return false;
-  return true;
-}
-
-// =============================================================================
-// JWT & TOTP Web Crypto Helpers
-// =============================================================================
-
-function base64UrlEncode(str: string): string {
-  return btoa(str).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
-
-function base64UrlEncodeBytes(bytes: Uint8Array): string {
-  let binary = "";
-  for (let i = 0; i < bytes.length; i++) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  return base64UrlEncode(binary);
-}
-
-function base64UrlDecode(str: string): string {
-  str = str.replace(/-/g, "+").replace(/_/g, "/");
-  while (str.length % 4) str += "=";
-  return atob(str);
-}
-
-async function signJwt(
-  payload: Record<string, any>,
-  secret: string
-): Promise<string> {
-  const enc = new TextEncoder();
-  const header = { alg: "HS256", typ: "JWT" };
-  const encodedHeader = base64UrlEncode(JSON.stringify(header));
-  const encodedPayload = base64UrlEncode(JSON.stringify(payload));
-  const message = `${encodedHeader}.${encodedPayload}`;
-
-  const key = await crypto.subtle.importKey(
-    "raw",
-    enc.encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"]
-  );
-
-  const signature = await crypto.subtle.sign("HMAC", key, enc.encode(message));
-  const encodedSignature = base64UrlEncodeBytes(new Uint8Array(signature));
-
-  return `${message}.${encodedSignature}`;
-}
-
-async function verifyJwt(
-  token: string,
-  secret: string
-): Promise<Record<string, any> | null> {
-  try {
-    const parts = token.split(".");
-    if (parts.length !== 3) return null;
-
-    const [headerB64, payloadB64, signatureB64] = parts;
-    const message = `${headerB64}.${payloadB64}`;
-    const enc = new TextEncoder();
-
-    const header = JSON.parse(base64UrlDecode(headerB64));
-    if (header.alg !== "HS256") return null;
-
-    const key = await crypto.subtle.importKey(
-      "raw",
-      enc.encode(secret),
-      { name: "HMAC", hash: "SHA-256" },
-      false,
-      ["verify"]
-    );
-
-    const sigStr = base64UrlDecode(signatureB64);
-    const sigBytes = new Uint8Array(sigStr.length);
-    for (let i = 0; i < sigStr.length; i++) sigBytes[i] = sigStr.charCodeAt(i);
-
-    const isValid = await crypto.subtle.verify(
-      "HMAC",
-      key,
-      sigBytes,
-      enc.encode(message)
-    );
-
-    if (!isValid) return null;
-
-    const payload = JSON.parse(base64UrlDecode(payloadB64));
-    if (payload.exp && Date.now() / 1000 > payload.exp) {
-      return null; // Expired
-    }
-
-    return payload;
-  } catch {
-    return null;
-  }
-}
-
-// RFC 6238 Base32 & TOTP Verification Helpers
-function base32Decode(str: string): Uint8Array {
-  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-  const cleanStr = str.toUpperCase().replace(/=+$/, "").replace(/\s+/g, "");
-  let bits = 0;
-  let value = 0;
-  const output: number[] = [];
-
-  for (let i = 0; i < cleanStr.length; i++) {
-    const val = alphabet.indexOf(cleanStr[i]);
-    if (val === -1) continue;
-    value = (value << 5) | val;
-    bits += 5;
-    if (bits >= 8) {
-      output.push((value >>> (bits - 8)) & 255);
-      bits -= 8;
-    }
-  }
-  return new Uint8Array(output);
-}
-
-async function generateTotpCode(
-  secretBase32: string,
-  counter: number
-): Promise<string> {
-  const keyBytes = base32Decode(secretBase32);
-  const cryptoKey = await crypto.subtle.importKey(
-    "raw",
-    keyBytes as unknown as BufferSource,
-    { name: "HMAC", hash: "SHA-1" },
-    false,
-    ["sign"]
-  );
-
-  const counterBuffer = new ArrayBuffer(8);
-  const view = new DataView(counterBuffer);
-  view.setUint32(0, Math.floor(counter / 0x100000000));
-  view.setUint32(4, counter >>> 0);
-
-  const signature = await crypto.subtle.sign("HMAC", cryptoKey, counterBuffer);
-  const hash = new Uint8Array(signature);
-  const offset = hash[hash.length - 1] & 0x0f;
-  const binary =
-    ((hash[offset] & 0x7f) << 24) |
-    ((hash[offset + 1] & 0xff) << 16) |
-    ((hash[offset + 2] & 0xff) << 8) |
-    (hash[offset + 3] & 0xff);
-
-  return (binary % 1000000).toString().padStart(6, "0");
-}
-
-/**
- * Verifies TOTP code against RFC 6238 window with replay protection.
- * If the current code matches an already-consumed time step, it is rejected.
- */
-async function verifyTotpCodeWithReplayCheck(
-  secretBase32: string,
-  userCode: string,
-  lastStep: number = 0
-): Promise<{ valid: boolean; matchedStep?: number }> {
-  const currentStep = Math.floor(Date.now() / 1000 / 30);
-  const cleanCode = userCode.trim();
-  for (let step = currentStep - 1; step <= currentStep + 1; step++) {
-    const validCode = await generateTotpCode(secretBase32, step);
-    if (timingSafeEqual(validCode, cleanCode)) {
-      if (step <= lastStep) {
-        // Replay detected!
-        return { valid: false, matchedStep: undefined };
-      }
-      return { valid: true, matchedStep: step };
-    }
-  }
-  return { valid: false };
-}
-
-// =============================================================================
-// AUTH ROUTES
-// =============================================================================
-
-// 1. Single-User Mode Login / Unlock
+// Auth endpoints
 app.post("/api/auth/single-login", async (c) => {
-  const clientIp = getClientIp(c);
-  // IP limit for single-user mode: 10 attempts per 5 minutes
-  const ipLimit = await checkRateLimit(c.env.CLOUDSYNC_KV, `ip:single:${clientIp}`, 10, 300);
-  if (!ipLimit.allowed) {
-    return c.json(
-      {
-        error: `Too many failed attempts. Please wait ${ipLimit.retryAfterSeconds} seconds before trying again.`,
-        retryAfter: ipLimit.retryAfterSeconds,
-      },
-      429,
-      { "Retry-After": `${ipLimit.retryAfterSeconds}` }
-    );
+  const clientIp = c.req.header("cf-connecting-ip") || c.req.header("x-forwarded-for") || "direct";
+  if (!checkAuthRateLimit(clientIp)) {
+    return c.json({ error: "Too many authentication attempts. Please try again in a minute." }, 429);
   }
 
   let body: { verifier?: string };
@@ -490,65 +422,33 @@ app.post("/api/auth/single-login", async (c) => {
 
   const verifier = (body?.verifier || "").trim();
   if (!verifier || !isValidHexHash(verifier)) {
-    return c.json({ error: "A valid 64-character password verifier is required." }, 400);
+    return c.json({ error: "Valid 64-character password verifier required." }, 400);
   }
 
   const secret = c.env.JWT_SECRET || "cloudsync-secret-change-me";
+  const hashed = await hashVerifier(verifier, secret);
 
-  if (c.env.CLOUDSYNC_KV) {
-    let stored = await c.env.CLOUDSYNC_KV.get("single:verifier");
-    if (!stored) {
-      // First setup: initialize single-user password verifier with pepper
-      const peppered = await pepperVerifier(verifier, secret);
-      await c.env.CLOUDSYNC_KV.put("single:verifier", peppered);
-      stored = peppered;
-    }
-
-    const check = await verifyPasswordVerifier(stored, verifier, secret);
-    if (!check.valid) {
-      await dummyTimingEqual(verifier, secret);
-      await recordFailedAttempt(c.env.CLOUDSYNC_KV, `ip:single:${clientIp}`, 300);
-      return c.json({ error: "Invalid master password." }, 401);
-    }
-
-    if (check.needsUpgrade) {
-      const peppered = await pepperVerifier(verifier, secret);
-      await c.env.CLOUDSYNC_KV.put("single:verifier", peppered);
-    }
+  let stored = await getStoredData(c, "single:verifier");
+  if (!stored) {
+    await putStoredData(c, "single:verifier", hashed);
+    stored = hashed;
+  }
+  if (stored !== hashed && stored !== verifier.toLowerCase()) {
+    return c.json({ error: "Invalid master password." }, 401);
   }
 
-  await resetRateLimit(c.env.CLOUDSYNC_KV, `ip:single:${clientIp}`);
-
   const token = await signJwt(
-    {
-      sub: "default",
-      username: "Owner",
-      exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 180, // 180 days
-    },
+    { sub: "default", username: "Owner", exp: Math.floor(Date.now() / 1000) + 86400 * 180 },
     secret
   );
 
-  return c.json({
-    ok: true,
-    token,
-    user: { id: "default", username: "Owner" },
-  });
+  return c.json({ ok: true, token, user: { id: "default", username: "Owner" } });
 });
 
-// 2. Multi-User: Register a new user
 app.post("/api/auth/register", async (c) => {
-  const clientIp = getClientIp(c);
-  // Rate limit registration by IP: max 10 registrations per 10 minutes
-  const regLimit = await checkRateLimit(c.env.CLOUDSYNC_KV, `ip:reg:${clientIp}`, 10, 600);
-  if (!regLimit.allowed) {
-    return c.json(
-      {
-        error: `Too many registration attempts. Please wait ${regLimit.retryAfterSeconds} seconds before trying again.`,
-        retryAfter: regLimit.retryAfterSeconds,
-      },
-      429,
-      { "Retry-After": `${regLimit.retryAfterSeconds}` }
-    );
+  const clientIp = c.req.header("cf-connecting-ip") || c.req.header("x-forwarded-for") || "direct";
+  if (!checkAuthRateLimit(clientIp)) {
+    return c.json({ error: "Too many registration attempts. Please try again in a minute." }, 429);
   }
 
   let body: {
@@ -571,102 +471,44 @@ app.post("/api/auth/register", async (c) => {
   if (!username || !verifier) {
     return c.json({ error: "Username and password verifier are required." }, 400);
   }
-
-  if (!isValidUsername(username)) {
-    return c.json(
-      {
-        error:
-          "Username must be between 3 and 32 characters and contain only letters, numbers, hyphens, or underscores.",
-      },
-      400
-    );
-  }
-
-  if (!isValidHexHash(verifier)) {
-    return c.json(
-      { error: "Password verifier must be a valid 64-character hex hash." },
-      400
-    );
-  }
-
-  if (recoveryVerifier && !isValidHexHash(recoveryVerifier)) {
-    return c.json(
-      { error: "Recovery verifier must be a valid 64-character hex hash." },
-      400
-    );
-  }
-
-  if (totpSecret && !isValidTotpSecret(totpSecret)) {
-    return c.json(
-      { error: "TOTP secret must be a valid Base32 string (16-64 characters)." },
-      400
-    );
-  }
-
-  const userKey = `user:${username.toLowerCase()}`;
-  const existing = await c.env.CLOUDSYNC_KV.get(userKey);
-  if (existing) {
-    return c.json({ error: "Username is already taken." }, 400);
+  if (!isValidUsername(username) || !isValidHexHash(verifier)) {
+    return c.json({ error: "Invalid username or verifier format." }, 400);
   }
 
   const secret = c.env.JWT_SECRET || "cloudsync-secret-change-me";
+  const userKey = `user:${username.toLowerCase()}`;
 
-  // Pepper the verifier and recovery verifier with server secret before persisting
-  const pepperedVerifier = await pepperVerifier(verifier, secret);
-  const pepperedRecovery = recoveryVerifier
-    ? await pepperVerifier(recoveryVerifier, secret)
-    : undefined;
+  const existing = await getStoredData(c, userKey);
+  if (existing) {
+    return c.json({ error: "Username already taken." }, 409);
+  }
 
   const userId = crypto.randomUUID();
   const userData = {
     id: userId,
     username,
-    verifier: pepperedVerifier,
-    recoveryVerifier: pepperedRecovery,
+    verifier: await hashVerifier(verifier, secret),
+    recoveryVerifier: recoveryVerifier ? await hashVerifier(recoveryVerifier, secret) : undefined,
     totpSecret: totpSecret || undefined,
-    createdAt: Date.now(),
+    created: Date.now(),
   };
 
-  await c.env.CLOUDSYNC_KV.put(userKey, JSON.stringify(userData));
-  await recordFailedAttempt(c.env.CLOUDSYNC_KV, `ip:reg:${clientIp}`, 600);
+  await putStoredData(c, userKey, JSON.stringify(userData));
 
   const token = await signJwt(
-    {
-      sub: userId,
-      username,
-      exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 90, // 90 days
-    },
+    { sub: userId, username, exp: Math.floor(Date.now() / 1000) + 86400 * 180 },
     secret
   );
 
-  return c.json({
-    ok: true,
-    token,
-    user: { id: userId, username },
-  });
+  return c.json({ ok: true, token, user: { id: userId, username } });
 });
 
-// 3. Multi-User: Log In with 2FA check
 app.post("/api/auth/login", async (c) => {
-  const clientIp = getClientIp(c);
-  // IP limit: 20 failed attempts per 5 minutes to prevent IP-wide lockout while stopping bots
-  const ipLimit = await checkRateLimit(c.env.CLOUDSYNC_KV, `ip:login:${clientIp}`, 20, 300);
-  if (!ipLimit.allowed) {
-    return c.json(
-      {
-        error: `Too many failed login attempts from this network. Please wait ${ipLimit.retryAfterSeconds} seconds before trying again.`,
-        retryAfter: ipLimit.retryAfterSeconds,
-      },
-      429,
-      { "Retry-After": `${ipLimit.retryAfterSeconds}` }
-    );
+  const clientIp = c.req.header("cf-connecting-ip") || c.req.header("x-forwarded-for") || "direct";
+  if (!checkAuthRateLimit(clientIp)) {
+    return c.json({ error: "Too many login attempts. Please try again in a minute." }, 429);
   }
-
-  let body: {
-    username?: string;
-    verifier?: string;
-    totpCode?: string;
-  };
+  let body: { username?: string; verifier?: string; totpCode?: string };
   try {
     body = await c.req.json();
   } catch {
@@ -678,139 +520,49 @@ app.post("/api/auth/login", async (c) => {
   const totpCode = (body?.totpCode || "").trim();
 
   if (!username || !verifier) {
-    return c.json({ error: "Username and password are required." }, 400);
-  }
-
-  if (!isValidUsername(username) || !isValidHexHash(verifier)) {
-    return c.json({ error: "Invalid username or password." }, 401);
-  }
-
-  // Account limit: 5 failed attempts per 5 minutes to prevent targeted brute force
-  const userLimit = await checkRateLimit(
-    c.env.CLOUDSYNC_KV,
-    `user:login:${username.toLowerCase()}`,
-    5,
-    300
-  );
-  if (!userLimit.allowed) {
-    return c.json(
-      {
-        error: `Too many failed attempts on this account. Please wait ${userLimit.retryAfterSeconds} seconds before trying again.`,
-        retryAfter: userLimit.retryAfterSeconds,
-      },
-      429,
-      { "Retry-After": `${userLimit.retryAfterSeconds}` }
-    );
+    return c.json({ error: "Username and password verifier are required." }, 400);
   }
 
   const secret = c.env.JWT_SECRET || "cloudsync-secret-change-me";
   const userKey = `user:${username.toLowerCase()}`;
-  const raw = await c.env.CLOUDSYNC_KV.get(userKey);
+  let user: any = null;
 
-  if (!raw) {
-    // Constant-time dummy hash to prevent user enumeration via timing
-    await dummyTimingEqual(verifier, secret);
-    await recordFailedAttempt(c.env.CLOUDSYNC_KV, `ip:login:${clientIp}`, 300);
-    await recordFailedAttempt(c.env.CLOUDSYNC_KV, `user:login:${username.toLowerCase()}`, 300);
+  const raw = await getStoredData(c, userKey);
+  if (raw) {
+    try {
+      user = JSON.parse(raw);
+    } catch {}
+  }
+
+  if (!user) {
     return c.json({ error: "Invalid username or password." }, 401);
   }
 
-  let user: any;
-  try {
-    user = JSON.parse(raw);
-  } catch {
-    return c.json({ error: "Account corrupted. Contact administrator." }, 500);
-  }
-
-  const authCheck = await verifyPasswordVerifier(user.verifier, verifier, secret);
-  if (!authCheck.valid) {
-    await recordFailedAttempt(c.env.CLOUDSYNC_KV, `ip:login:${clientIp}`, 300);
-    await recordFailedAttempt(c.env.CLOUDSYNC_KV, `user:login:${username.toLowerCase()}`, 300);
+  const hashed = await hashVerifier(verifier, secret);
+  if (user.verifier !== hashed && user.verifier !== verifier.toLowerCase()) {
     return c.json({ error: "Invalid username or password." }, 401);
   }
 
-  // Auto-upgrade legacy stored verifiers to peppered v2
-  if (authCheck.needsUpgrade) {
-    user.verifier = await pepperVerifier(verifier, secret);
-    await c.env.CLOUDSYNC_KV.put(userKey, JSON.stringify(user));
-  }
-
-  // 2FA check if enabled
   if (user.totpSecret) {
     if (!totpCode) {
-      return c.json({
-        ok: false,
-        requires2FA: true,
-        message: "2FA authentication code required.",
-      });
+      return c.json({ error: "2FA code required.", requires2FA: true }, 401);
     }
-
-    if (!isValidTotpCode(totpCode)) {
-      await recordFailedAttempt(c.env.CLOUDSYNC_KV, `ip:login:${clientIp}`, 300);
-      await recordFailedAttempt(c.env.CLOUDSYNC_KV, `user:login:${username.toLowerCase()}`, 300);
-      return c.json({ error: "2FA code must be exactly 6 digits." }, 400);
+    const valid = await verifyTotpCode(user.totpSecret, totpCode);
+    if (!valid) {
+      return c.json({ error: "Invalid 2FA code." }, 401);
     }
-
-    const totpResult = await verifyTotpCodeWithReplayCheck(
-      user.totpSecret,
-      totpCode,
-      user.lastTotpStep || 0
-    );
-
-    if (!totpResult.valid) {
-      await recordFailedAttempt(c.env.CLOUDSYNC_KV, `ip:login:${clientIp}`, 300);
-      await recordFailedAttempt(c.env.CLOUDSYNC_KV, `user:login:${username.toLowerCase()}`, 300);
-      return c.json({ error: "Invalid or already used 2FA verification code." }, 401);
-    }
-
-    user.lastTotpStep = totpResult.matchedStep;
-    await c.env.CLOUDSYNC_KV.put(userKey, JSON.stringify(user));
   }
 
-  // Reset rate limit counters on successful authentication
-  await Promise.all([
-    resetRateLimit(c.env.CLOUDSYNC_KV, `ip:login:${clientIp}`),
-    resetRateLimit(c.env.CLOUDSYNC_KV, `user:login:${username.toLowerCase()}`),
-  ]);
-
   const token = await signJwt(
-    {
-      sub: user.id,
-      username: user.username,
-      exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 90,
-    },
+    { sub: user.id, username: user.username, exp: Math.floor(Date.now() / 1000) + 86400 * 180 },
     secret
   );
 
-  return c.json({
-    ok: true,
-    token,
-    user: { id: user.id, username: user.username },
-  });
+  return c.json({ ok: true, token, user: { id: user.id, username: user.username } });
 });
 
-// 4. Multi-User: Recover Account / Reset Password via 2FA Code or Recovery Key
 app.post("/api/auth/recover", async (c) => {
-  const clientIp = getClientIp(c);
-  // IP limit: 20 failed recovery attempts per 5 minutes
-  const ipLimit = await checkRateLimit(c.env.CLOUDSYNC_KV, `ip:recover:${clientIp}`, 20, 300);
-  if (!ipLimit.allowed) {
-    return c.json(
-      {
-        error: `Too many failed recovery attempts from this network. Please wait ${ipLimit.retryAfterSeconds} seconds before trying again.`,
-        retryAfter: ipLimit.retryAfterSeconds,
-      },
-      429,
-      { "Retry-After": `${ipLimit.retryAfterSeconds}` }
-    );
-  }
-
-  let body: {
-    username?: string;
-    totpCode?: string;
-    recoveryVerifier?: string;
-    newVerifier?: string;
-  };
+  let body: { username?: string; recoveryVerifier?: string; newVerifier?: string };
   try {
     body = await c.req.json();
   } catch {
@@ -818,173 +570,72 @@ app.post("/api/auth/recover", async (c) => {
   }
 
   const username = (body?.username || "").trim();
-  const totpCode = (body?.totpCode || "").trim();
   const recoveryVerifier = (body?.recoveryVerifier || "").trim();
   const newVerifier = (body?.newVerifier || "").trim();
 
-  if (!username || !newVerifier) {
-    return c.json(
-      {
-        error: "Username and new password verifier are required.",
-      },
-      400
-    );
-  }
-
-  if (!totpCode && !recoveryVerifier) {
-    return c.json(
-      {
-        error: "2FA verification code or recovery key is required.",
-      },
-      400
-    );
-  }
-
-  if (!isValidUsername(username) || !isValidHexHash(newVerifier)) {
-    return c.json({ error: "Invalid recovery credentials." }, 401);
-  }
-
-  if (totpCode && !isValidTotpCode(totpCode)) {
-    return c.json({ error: "2FA code must be exactly 6 digits." }, 400);
-  }
-
-  if (recoveryVerifier && !isValidHexHash(recoveryVerifier)) {
-    return c.json({ error: "Recovery verifier must be a valid 64-character hex hash." }, 400);
-  }
-
-  const userLimit = await checkRateLimit(
-    c.env.CLOUDSYNC_KV,
-    `user:recover:${username.toLowerCase()}`,
-    5,
-    300
-  );
-  if (!userLimit.allowed) {
-    return c.json(
-      {
-        error: `Too many failed recovery attempts on this account. Please wait ${userLimit.retryAfterSeconds} seconds before trying again.`,
-        retryAfter: userLimit.retryAfterSeconds,
-      },
-      429,
-      { "Retry-After": `${userLimit.retryAfterSeconds}` }
-    );
+  if (!username || !recoveryVerifier || !newVerifier) {
+    return c.json({ error: "Username, recovery code, and new password are required." }, 400);
   }
 
   const secret = c.env.JWT_SECRET || "cloudsync-secret-change-me";
   const userKey = `user:${username.toLowerCase()}`;
-  const raw = await c.env.CLOUDSYNC_KV.get(userKey);
+  let user: any = null;
 
-  if (!raw) {
-    await dummyTimingEqual(newVerifier, secret);
-    await recordFailedAttempt(c.env.CLOUDSYNC_KV, `ip:recover:${clientIp}`, 300);
-    await recordFailedAttempt(c.env.CLOUDSYNC_KV, `user:recover:${username.toLowerCase()}`, 300);
-    return c.json({ error: "Invalid username or verification code." }, 401);
+  const raw = await getStoredData(c, userKey);
+  if (raw) {
+    try {
+      user = JSON.parse(raw);
+    } catch {}
   }
 
-  let user: any;
-  try {
-    user = JSON.parse(raw);
-  } catch {
-    return c.json({ error: "Account corrupted. Contact administrator." }, 500);
+  if (!user || !user.recoveryVerifier) {
+    return c.json({ error: "Invalid recovery key or user not found." }, 401);
   }
 
-  if (totpCode) {
-    // 2FA TOTP verification
-    if (!user.totpSecret) {
-      await recordFailedAttempt(c.env.CLOUDSYNC_KV, `ip:recover:${clientIp}`, 300);
-      await recordFailedAttempt(c.env.CLOUDSYNC_KV, `user:recover:${username.toLowerCase()}`, 300);
-      return c.json(
-        {
-          error:
-            "2FA was not set up for this account. Password cannot be reset without 2FA.",
-        },
-        400
-      );
-    }
-
-    const totpResult = await verifyTotpCodeWithReplayCheck(
-      user.totpSecret,
-      totpCode,
-      user.lastTotpStep || 0
-    );
-
-    if (!totpResult.valid) {
-      await recordFailedAttempt(c.env.CLOUDSYNC_KV, `ip:recover:${clientIp}`, 300);
-      await recordFailedAttempt(c.env.CLOUDSYNC_KV, `user:recover:${username.toLowerCase()}`, 300);
-      return c.json({ error: "Invalid or expired 2FA verification code." }, 401);
-    }
-
-    user.lastTotpStep = totpResult.matchedStep;
-  } else if (recoveryVerifier) {
-    // Legacy recovery key verification
-    if (!user.recoveryVerifier) {
-      await dummyTimingEqual(recoveryVerifier, secret);
-      await recordFailedAttempt(c.env.CLOUDSYNC_KV, `ip:recover:${clientIp}`, 300);
-      await recordFailedAttempt(c.env.CLOUDSYNC_KV, `user:recover:${username.toLowerCase()}`, 300);
-      return c.json({ error: "No recovery key set for this account." }, 401);
-    }
-
-    const recCheck = await verifyPasswordVerifier(user.recoveryVerifier, recoveryVerifier, secret);
-    if (!recCheck.valid) {
-      await recordFailedAttempt(c.env.CLOUDSYNC_KV, `ip:recover:${clientIp}`, 300);
-      await recordFailedAttempt(c.env.CLOUDSYNC_KV, `user:recover:${username.toLowerCase()}`, 300);
-      return c.json({ error: "Invalid recovery key." }, 401);
-    }
-
-    if (recCheck.needsUpgrade) {
-      user.recoveryVerifier = await pepperVerifier(recoveryVerifier, secret);
-    }
+  const hashedRecovery = await hashVerifier(recoveryVerifier, secret);
+  if (user.recoveryVerifier !== hashedRecovery && user.recoveryVerifier !== recoveryVerifier.toLowerCase()) {
+    return c.json({ error: "Invalid recovery key." }, 401);
   }
 
-  // Update password verifier with peppered version
-  user.verifier = await pepperVerifier(newVerifier, secret);
-  await c.env.CLOUDSYNC_KV.put(userKey, JSON.stringify(user));
-
-  await Promise.all([
-    resetRateLimit(c.env.CLOUDSYNC_KV, `ip:recover:${clientIp}`),
-    resetRateLimit(c.env.CLOUDSYNC_KV, `user:recover:${username.toLowerCase()}`),
-    resetRateLimit(c.env.CLOUDSYNC_KV, `ip:login:${clientIp}`),
-    resetRateLimit(c.env.CLOUDSYNC_KV, `user:login:${username.toLowerCase()}`),
-  ]);
+  user.verifier = await hashVerifier(newVerifier, secret);
+  await putStoredData(c, userKey, JSON.stringify(user));
 
   const token = await signJwt(
-    {
-      sub: user.id,
-      username: user.username,
-      exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 90,
-    },
+    { sub: user.id, username: user.username, exp: Math.floor(Date.now() / 1000) + 86400 * 180 },
     secret
   );
 
-  return c.json({
-    ok: true,
-    token,
-    user: { id: user.id, username: user.username },
-    has2FA: Boolean(user.totpSecret),
-    message: "Password reset successfully.",
-  });
+  return c.json({ ok: true, token, user: { id: user.id, username: user.username } });
 });
 
-// =============================================================================
-// AUTHENTICATION MIDDLEWARE FOR SYNC & USER API
-// =============================================================================
+app.get("/api/auth/verify-token", async (c) => {
+  const auth = c.req.header("Authorization") || "";
+  const match = auth.match(/^Bearer\s+(.+)$/i);
+  if (!match) return c.json({ valid: false }, 401);
+
+  const secret = c.env.JWT_SECRET || "cloudsync-secret-change-me";
+  const payload = await verifyJwt(match[1], secret);
+  if (!payload) return c.json({ valid: false }, 401);
+
+  return c.json({ valid: true, userId: payload.sub, username: payload.username });
+});
+
+// Authenticated route guard
 app.use("/api/*", async (c, next) => {
-  if (
-    c.req.path === "/api/info" ||
-    c.req.path.startsWith("/api/auth/")
-  ) {
-    return next();
+  const path = c.req.path;
+  if (path.startsWith("/api/auth/") || path === "/api/info") {
+    return await next();
   }
 
-  const authHeader = c.req.header("Authorization") || "";
-  const match = authHeader.match(/^Bearer\s+(.*)$/i);
+  const auth = c.req.header("Authorization") || "";
+  const match = auth.match(/^Bearer\s+(.+)$/i);
   if (!match) {
     return c.json({ error: "Unauthorized: Missing Bearer token." }, 401);
   }
 
   const secret = c.env.JWT_SECRET || "cloudsync-secret-change-me";
   const payload = await verifyJwt(match[1], secret);
-
-  if (!payload || !payload.sub || typeof payload.sub !== "string") {
+  if (!payload || !payload.sub) {
     return c.json({ error: "Unauthorized: Invalid or expired token." }, 401);
   }
 
@@ -993,39 +644,34 @@ app.use("/api/*", async (c, next) => {
   await next();
 });
 
-// =============================================================================
-// USER PROFILE & STORAGE USAGE
-// =============================================================================
+// User profile & storage
 app.get("/api/user/me", async (c) => {
   const userId = c.get("userId");
   const username = c.get("username");
 
-  // Sum storage used in R2
   let storageUsedBytes = 0;
-  let cursor: string | undefined = undefined;
-  let truncated = true;
-
-  while (truncated) {
-    const list = await c.env.CLOUDSYNC_BUCKET.list({
-      prefix: `users/${userId}/`,
-      cursor,
-      limit: 1000,
-    });
-    for (const obj of list.objects) {
-      storageUsedBytes += obj.size;
+  const cached = storageCache.get(userId);
+  if (cached && Date.now() - cached.timestamp < 300_000) {
+    storageUsedBytes = cached.bytes;
+  } else {
+    let cursor: string | undefined = undefined;
+    let truncated = true;
+    while (truncated) {
+      const list = await c.env.CLOUDSYNC_BUCKET.list({ prefix: `users/${userId}/`, cursor, limit: 1000 });
+      for (const obj of list.objects) storageUsedBytes += obj.size;
+      truncated = list.truncated;
+      cursor = list.truncated ? list.cursor : undefined;
     }
-    truncated = list.truncated;
-    cursor = list.truncated ? list.cursor : undefined;
+    storageCache.set(userId, { bytes: storageUsedBytes, timestamp: Date.now() });
   }
 
-  // Check if user has 2FA enabled
   let has2FA = false;
-  if (c.env.CLOUDSYNC_KV && username && username !== "Owner") {
-    const raw = await c.env.CLOUDSYNC_KV.get(`user:${username.toLowerCase()}`);
+  if (username && username !== "Owner") {
+    const raw = await getStoredData(c, `user:${username.toLowerCase()}`);
     if (raw) {
       try {
-        const user = JSON.parse(raw);
-        has2FA = Boolean(user.totpSecret);
+        const u = JSON.parse(raw);
+        has2FA = Boolean(u.totpSecret);
       } catch {}
     }
   }
@@ -1036,31 +682,12 @@ app.get("/api/user/me", async (c) => {
     username,
     has2FA,
     storageUsedBytes,
-    quotaBytes: 10 * 1024 * 1024 * 1024, // 10 GB R2 free tier
+    quotaBytes: 10 * 1024 * 1024 * 1024,
   });
 });
 
-// Set up / enable 2FA
 app.post("/api/user/setup-2fa", async (c) => {
   const username = c.get("username");
-
-  const rateCheck = await checkRateLimit(
-    c.env.CLOUDSYNC_KV,
-    `user:2fa:${username.toLowerCase()}`,
-    5,
-    300
-  );
-  if (!rateCheck.allowed) {
-    return c.json(
-      {
-        error: `Too many 2FA setup attempts. Please wait ${rateCheck.retryAfterSeconds} seconds before trying again.`,
-        retryAfter: rateCheck.retryAfterSeconds,
-      },
-      429,
-      { "Retry-After": `${rateCheck.retryAfterSeconds}` }
-    );
-  }
-
   let body: { totpSecret?: string; totpCode?: string };
   try {
     body = await c.req.json();
@@ -1071,153 +698,90 @@ app.post("/api/user/setup-2fa", async (c) => {
   const totpSecret = (body?.totpSecret || "").trim();
   const totpCode = (body?.totpCode || "").trim();
 
-  if (!totpSecret || !totpCode) {
-    return c.json(
-      { error: "TOTP secret and 6-digit verification code are required." },
-      400
-    );
-  }
-
   if (!isValidTotpSecret(totpSecret) || !isValidTotpCode(totpCode)) {
-    return c.json(
-      { error: "Invalid 2FA secret format or 6-digit code." },
-      400
-    );
+    return c.json({ error: "Invalid 2FA secret or 6-digit code." }, 400);
   }
 
-  const totpResult = await verifyTotpCodeWithReplayCheck(totpSecret, totpCode, 0);
-  if (!totpResult.valid) {
-    await recordFailedAttempt(
-      c.env.CLOUDSYNC_KV,
-      `user:2fa:${username.toLowerCase()}`,
-      300
-    );
-    return c.json(
-      {
-        error:
-          "Invalid 2FA code. Please check your authenticator app and device clock.",
-      },
-      400
-    );
+  const valid = await verifyTotpCode(totpSecret, totpCode);
+  if (!valid) {
+    return c.json({ error: "Invalid 2FA code." }, 400);
   }
 
   const userKey = `user:${username.toLowerCase()}`;
-  const raw = await c.env.CLOUDSYNC_KV.get(userKey);
-  if (!raw) {
-    return c.json({ error: "User not found." }, 404);
-  }
+  const raw = await getStoredData(c, userKey);
+  if (!raw) return c.json({ error: "User not found." }, 404);
 
   const user = JSON.parse(raw);
   user.totpSecret = totpSecret;
-  user.lastTotpStep = totpResult.matchedStep;
-  await c.env.CLOUDSYNC_KV.put(userKey, JSON.stringify(user));
+  await putStoredData(c, userKey, JSON.stringify(user));
 
-  await resetRateLimit(c.env.CLOUDSYNC_KV, `user:2fa:${username.toLowerCase()}`);
-
-  return c.json({
-    ok: true,
-    message: "Two-factor authentication enabled successfully.",
-  });
+  return c.json({ ok: true, message: "Two-factor authentication enabled." });
 });
 
-// Disable 2FA
 app.post("/api/user/disable-2fa", async (c) => {
   const username = c.get("username");
-  let body: { verifier?: string };
+  let body: { totpCode?: string };
   try {
     body = await c.req.json();
   } catch {
     return c.json({ error: "Invalid JSON payload." }, 400);
   }
 
-  const verifier = (body?.verifier || "").trim();
-  if (!verifier || !isValidHexHash(verifier)) {
-    return c.json({ error: "Valid password verifier required." }, 400);
-  }
-
+  const totpCode = (body?.totpCode || "").trim();
   const userKey = `user:${username.toLowerCase()}`;
-  const raw = await c.env.CLOUDSYNC_KV.get(userKey);
-  if (!raw) {
-    return c.json({ error: "User not found." }, 404);
-  }
+  const raw = await getStoredData(c, userKey);
+  if (!raw) return c.json({ error: "User not found." }, 404);
 
-  const secret = c.env.JWT_SECRET || "cloudsync-secret-change-me";
   const user = JSON.parse(raw);
-  const authCheck = await verifyPasswordVerifier(user.verifier, verifier, secret);
-  if (!authCheck.valid) {
-    return c.json({ error: "Invalid password." }, 401);
-  }
+  if (!user.totpSecret) return c.json({ ok: true });
+
+  const valid = await verifyTotpCode(user.totpSecret, totpCode);
+  if (!valid) return c.json({ error: "Invalid 2FA code." }, 400);
 
   delete user.totpSecret;
-  delete user.lastTotpStep;
-  if (authCheck.needsUpgrade) {
-    user.verifier = await pepperVerifier(verifier, secret);
-  }
-  await c.env.CLOUDSYNC_KV.put(userKey, JSON.stringify(user));
+  await putStoredData(c, userKey, JSON.stringify(user));
 
   return c.json({ ok: true, message: "Two-factor authentication disabled." });
 });
 
-// =============================================================================
-// SYNC API (FakeFs Remote Backend)
-// =============================================================================
-
-export interface VaultChange {
-  rev: number;
-  key: string;
-  action: "put" | "delete" | "cursor";
-  mtime: number;
-  size?: number;
-  cursor?: { line: number; ch: number };
-}
-
-async function recordVaultChange(
-  env: Bindings,
-  userId: string,
-  vault: string,
-  key: string,
-  action: "put" | "delete" | "cursor",
-  mtime: number,
-  size?: number,
-  cursor?: { line: number; ch: number }
-): Promise<number> {
-  const rev = Date.now();
-  const revKey = `vault_rev:${userId}:${vault}`;
-  const changesKey = `vault_changes:${userId}:${vault}`;
-
+app.post("/api/user/change-password", async (c) => {
+  const username = c.get("username");
+  let body: { oldVerifier?: string; newVerifier?: string };
   try {
-    const existingRaw = await env.CLOUDSYNC_KV.get(changesKey);
-    let changes: VaultChange[] = [];
-    if (existingRaw) {
-      try {
-        changes = JSON.parse(existingRaw);
-      } catch {}
-    }
-    changes.unshift({ rev, key, action, mtime, size, cursor });
-    if (changes.length > 100) {
-      changes = changes.slice(0, 100);
-    }
-    await Promise.all([
-      env.CLOUDSYNC_KV.put(revKey, `${rev}`),
-      env.CLOUDSYNC_KV.put(changesKey, JSON.stringify(changes)),
-    ]);
-  } catch (err) {
-    console.error("Failed to record vault change:", err);
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "Invalid JSON payload." }, 400);
   }
 
-  return rev;
-}
+  const oldVerifier = (body?.oldVerifier || "").trim();
+  const newVerifier = (body?.newVerifier || "").trim();
 
-// =============================================================================
-// Vault Management Endpoints (List, Create, Delete Remote Vaults)
-// =============================================================================
+  if (!isValidHexHash(oldVerifier) || !isValidHexHash(newVerifier)) {
+    return c.json({ error: "Valid 64-character verifiers required." }, 400);
+  }
 
-// List all remote vaults for user
+  const secret = c.env.JWT_SECRET || "cloudsync-secret-change-me";
+  const userKey = `user:${username.toLowerCase()}`;
+  const raw = await getStoredData(c, userKey);
+  if (!raw) return c.json({ error: "User not found." }, 404);
+
+  const user = JSON.parse(raw);
+  const oldHashed = await hashVerifier(oldVerifier, secret);
+  if (user.verifier !== oldHashed && user.verifier !== oldVerifier.toLowerCase()) {
+    return c.json({ error: "Incorrect current password." }, 401);
+  }
+
+  user.verifier = await hashVerifier(newVerifier, secret);
+  await putStoredData(c, userKey, JSON.stringify(user));
+
+  return c.json({ ok: true, message: "Password updated successfully." });
+});
+
+// Vault management
 app.get("/api/vaults", async (c) => {
   const userId = c.get("userId");
   const vaultNamesSet = new Set<string>();
 
-  // 1. Delimited prefixes in R2 (Source of Truth)
   try {
     const listed = await c.env.CLOUDSYNC_BUCKET.list({
       prefix: `users/${userId}/vaults/`,
@@ -1225,50 +789,23 @@ app.get("/api/vaults", async (c) => {
     });
     if (listed.delimitedPrefixes) {
       for (const p of listed.delimitedPrefixes) {
-        const parts = p.split("/");
-        const name = parts[3];
-        if (name && isValidVaultName(name)) {
-          vaultNamesSet.add(name);
-        }
+        const name = p.split("/")[3];
+        if (name && isValidVaultName(name)) vaultNamesSet.add(name);
       }
     }
   } catch (err) {
-    console.error("Failed to list R2 vault prefixes:", err);
+    console.error("Failed to list vault prefixes:", err);
   }
 
-  // 2. Check KV registered vaults ONLY if they actually have at least 1 object in R2
-  // (Prevents ghost vaults caused by Cloudflare KV free-tier daily write limits)
-  try {
-    const userVaultsKey = `user_vaults:${userId}`;
-    const rawVaults = await c.env.CLOUDSYNC_KV.get(userVaultsKey);
-    if (rawVaults) {
-      const arr = JSON.parse(rawVaults);
-      if (Array.isArray(arr)) {
-        for (const v of arr) {
-          if (typeof v === "string" && isValidVaultName(v) && !vaultNamesSet.has(v)) {
-            const check = await c.env.CLOUDSYNC_BUCKET.list({
-              prefix: `users/${userId}/vaults/${v}/`,
-              limit: 1,
-            });
-            if (check.objects && check.objects.length > 0) {
-              vaultNamesSet.add(v);
-            }
-          }
-        }
-      }
-    }
-  } catch (err) {
-    console.warn("KV vault check skipped:", err);
-  }
-
-  const vaultNames = Array.from(vaultNamesSet);
   const vaults = await Promise.all(
-    vaultNames.map(async (name) => {
+    Array.from(vaultNamesSet).map(async (name) => {
       let revision = 0;
       try {
-        const revKey = `vault_rev:${userId}:${name}`;
-        const revVal = await c.env.CLOUDSYNC_KV.get(revKey);
-        if (revVal) revision = Number.parseInt(revVal, 10);
+        const metaObj = await c.env.CLOUDSYNC_BUCKET.get(`users/${userId}/vaults/${name}/.cloudsync_meta.json`);
+        if (metaObj) {
+          const meta = (await metaObj.json()) as any;
+          if (meta?.revision) revision = meta.revision;
+        }
       } catch {}
       return { name, revision };
     })
@@ -1277,10 +814,8 @@ app.get("/api/vaults", async (c) => {
   return c.json({ ok: true, vaults });
 });
 
-// Create a new remote vault
 app.post("/api/vaults", async (c) => {
   const userId = c.get("userId");
-
   let body: { name?: string };
   try {
     body = await c.req.json();
@@ -1289,143 +824,73 @@ app.post("/api/vaults", async (c) => {
   }
 
   const name = (body?.name || "").trim();
-  if (!name || !isValidVaultName(name)) {
-    return c.json(
-      { error: "Invalid vault name. Use 1-64 alphanumeric characters, dashes, or underscores." },
-      400
-    );
+  if (!isValidVaultName(name)) {
+    return c.json({ error: "Invalid vault name." }, 400);
   }
 
-  // 1. Create vault marker in R2 (Primary truth - 1,000,000 ops/month)
-  try {
-    await c.env.CLOUDSYNC_BUCKET.put(
-      `users/${userId}/vaults/${name}/.cloudsync`,
-      JSON.stringify({ created: Date.now(), name }),
-      { customMetadata: { created: `${Date.now()}` } }
-    );
-  } catch (err) {
-    console.error("Failed to write R2 vault marker:", err);
-  }
-
-  // 2. Best-effort registration in KV (wrapped in try/catch to never fail on KV limit)
-  try {
-    const userVaultsKey = `user_vaults:${userId}`;
-    const rawVaults = await c.env.CLOUDSYNC_KV.get(userVaultsKey);
-    let arr: string[] = [];
-    if (rawVaults) {
-      try {
-        arr = JSON.parse(rawVaults);
-        if (!Array.isArray(arr)) arr = [];
-      } catch {
-        arr = [];
-      }
-    }
-
-    if (!arr.includes(name)) {
-      arr.push(name);
-      await c.env.CLOUDSYNC_KV.put(userVaultsKey, JSON.stringify(arr));
-    }
-  } catch (err) {
-    console.warn("KV registration skipped due to KV limits:", err);
-  }
+  const now = Date.now();
+  await c.env.CLOUDSYNC_BUCKET.put(
+    `users/${userId}/vaults/${name}/.cloudsync`,
+    JSON.stringify({ created: now, name }),
+    { customMetadata: { created: `${now}` } }
+  );
+  await c.env.CLOUDSYNC_BUCKET.put(
+    `users/${userId}/vaults/${name}/.cloudsync_meta.json`,
+    JSON.stringify({ revision: now, changes: [] }),
+    { httpMetadata: { contentType: "application/json" } }
+  );
 
   return c.json({ ok: true, name });
 });
 
-// Delete a remote vault
 app.delete("/api/vaults/:vaultName", async (c) => {
   const userId = c.get("userId");
   const vaultName = c.req.param("vaultName");
-
-  if (!vaultName || !isValidVaultName(vaultName)) {
+  if (!isValidVaultName(vaultName)) {
     return c.json({ error: "Invalid vault identifier." }, 400);
   }
 
-  // 1. Delete all R2 files under this vault (including .cloudsync marker)
-  try {
-    const prefixes = [
-      `users/${userId}/vaults/${vaultName}/`,
-      `users/${userId}/history/${vaultName}/`,
-      `users/${userId}/trash/${vaultName}/`,
-    ];
-    for (const prefix of prefixes) {
-      let truncated = true;
-      let cursor: string | undefined = undefined;
-      while (truncated) {
-        const listRes = await c.env.CLOUDSYNC_BUCKET.list({ prefix, cursor, limit: 500 });
-        const keys = listRes.objects.map((o) => o.key);
-        if (keys.length > 0) {
-          await c.env.CLOUDSYNC_BUCKET.delete(keys);
-        }
-        truncated = listRes.truncated;
-        cursor = listRes.truncated ? listRes.cursor : undefined;
-      }
+  const prefixes = [
+    `users/${userId}/vaults/${vaultName}/`,
+    `users/${userId}/history/${vaultName}/`,
+    `users/${userId}/trash/${vaultName}/`,
+  ];
+
+  for (const prefix of prefixes) {
+    let truncated = true;
+    let cursor: string | undefined = undefined;
+    while (truncated) {
+      const list = await c.env.CLOUDSYNC_BUCKET.list({ prefix, cursor, limit: 500 });
+      const keys = list.objects.map((o) => o.key);
+      if (keys.length > 0) await c.env.CLOUDSYNC_BUCKET.delete(keys);
+      truncated = list.truncated;
+      cursor = list.truncated ? list.cursor : undefined;
     }
-    // Also ensure any non-directory key matching vaultName is purged
-    await Promise.allSettled([
-      c.env.CLOUDSYNC_BUCKET.delete(`users/${userId}/vaults/${vaultName}`),
-      c.env.CLOUDSYNC_BUCKET.delete(`users/${userId}/vaults/${vaultName}/`),
-    ]);
-  } catch (err) {
-    console.error("Failed to delete R2 vault files:", err);
   }
 
-  // 2. Best-effort cleanup from KV (never fails deletion if KV is rate-limited)
-  try {
-    const userVaultsKey = `user_vaults:${userId}`;
-    const rawVaults = await c.env.CLOUDSYNC_KV.get(userVaultsKey);
-    if (rawVaults) {
-      let arr: string[] = JSON.parse(rawVaults);
-      arr = arr.filter((v) => v !== vaultName && v.toLowerCase() !== vaultName.toLowerCase());
-      await c.env.CLOUDSYNC_KV.put(userVaultsKey, JSON.stringify(arr));
-    }
-    await Promise.allSettled([
-      c.env.CLOUDSYNC_KV.delete(`vault_rev:${userId}:${vaultName}`),
-      c.env.CLOUDSYNC_KV.delete(`vault_changes:${userId}:${vaultName}`),
-      c.env.CLOUDSYNC_KV.delete(`vault_shares:${userId}:${vaultName}`),
-      c.env.CLOUDSYNC_KV.delete(`vault_devices:${userId}:${vaultName}`),
-    ]);
-  } catch (err) {
-    console.warn("KV cleanup skipped due to KV limits:", err);
-  }
+  cursorCache.delete(`${userId}:${vaultName}`);
+  storageCache.delete(userId);
 
   return c.json({ ok: true, deleted: vaultName });
 });
 
-// List all files in vault (Walk)
+// File sync endpoints
 app.get("/api/sync/walk", async (c) => {
   const userId = c.get("userId");
   const vault = c.req.query("vault") || "default";
-
-  if (!isValidVaultName(vault)) {
-    return c.json({ error: "Invalid vault identifier." }, 400);
-  }
+  if (!isValidVaultName(vault)) return c.json({ error: "Invalid vault." }, 400);
 
   const prefix = `users/${userId}/vaults/${vault}/`;
-
-  const files: Array<{
-    key: string;
-    keyRaw: string;
-    size: number;
-    sizeRaw: number;
-    mtimeCli?: number;
-    mtimeSvr?: number;
-    etag?: string;
-  }> = [];
-
+  const files: any[] = [];
   let cursor: string | undefined = undefined;
   let truncated = true;
 
   while (truncated) {
-    const list = await c.env.CLOUDSYNC_BUCKET.list({
-      prefix,
-      cursor,
-      limit: 1000,
-    } as any);
-
+    const list = await c.env.CLOUDSYNC_BUCKET.list({ prefix, cursor, limit: 1000 } as any);
     for (const obj of list.objects) {
       const relKey = obj.key.slice(prefix.length);
-      if (relKey === ".cloudsync" || relKey === "") continue;
+      if (relKey.startsWith(".cloudsync") || relKey === "") continue;
+
       const mtime = obj.customMetadata?.mtime
         ? Number.parseInt(obj.customMetadata.mtime, 10)
         : obj.uploaded.getTime();
@@ -1440,174 +905,150 @@ app.get("/api/sync/walk", async (c) => {
         etag: obj.httpEtag,
       });
     }
-
     truncated = list.truncated;
     cursor = list.truncated ? list.cursor : undefined;
   }
 
-  const revKey = `vault_rev:${userId}:${vault}`;
-  const latestRevStr = await c.env.CLOUDSYNC_KV.get(revKey);
-  const latestRev = latestRevStr ? Number.parseInt(latestRevStr, 10) : 0;
+  let latestRev = 0;
+  try {
+    const metaObj = await c.env.CLOUDSYNC_BUCKET.get(`users/${userId}/vaults/${vault}/.cloudsync_meta.json`);
+    if (metaObj) {
+      const meta = (await metaObj.json()) as any;
+      if (meta?.revision) latestRev = meta.revision;
+    }
+  } catch {}
 
   return c.json({ ok: true, files, revision: latestRev });
 });
 
-// Real-Time Changes Feed (Fast invalidation / pull)
 app.get("/api/sync/changes", async (c) => {
   const userId = c.get("userId");
   const vault = c.req.query("vault") || "default";
+  if (!isValidVaultName(vault)) return c.json({ error: "Invalid vault." }, 400);
 
-  if (!isValidVaultName(vault)) {
-    return c.json({ error: "Invalid vault identifier." }, 400);
-  }
+  const since = Number.parseInt(c.req.query("since") || "0", 10);
+  const vaultKey = `${userId}:${vault}`;
 
-  const sinceStr = c.req.query("since");
-  const since = sinceStr ? Number.parseInt(sinceStr, 10) : 0;
-
-  const revKey = `vault_rev:${userId}:${vault}`;
-  const latestRevStr = await c.env.CLOUDSYNC_KV.get(revKey);
-  const latestRev = latestRevStr ? Number.parseInt(latestRevStr, 10) : 0;
-
-  if (since > 0 && latestRev <= since) {
-    return c.json({
-      ok: true,
-      revision: latestRev,
-      fullScanNeeded: false,
-      changes: [],
-    });
-  }
-
-  const changesKey = `vault_changes:${userId}:${vault}`;
-  const rawChanges = await c.env.CLOUDSYNC_KV.get(changesKey);
+  let latestRev = 0;
   let allChanges: VaultChange[] = [];
-  if (rawChanges) {
-    try {
-      allChanges = JSON.parse(rawChanges);
-    } catch {}
+
+  try {
+    const metaObj = await c.env.CLOUDSYNC_BUCKET.get(`users/${userId}/vaults/${vault}/.cloudsync_meta.json`);
+    if (metaObj) {
+      const meta = (await metaObj.json()) as any;
+      latestRev = meta?.revision || 0;
+      allChanges = Array.isArray(meta?.changes) ? meta.changes : [];
+    }
+  } catch {}
+
+  const memCursor = cursorCache.get(vaultKey);
+  const memCursorMatches = memCursor && memCursor.rev > since;
+
+  if (since > 0 && latestRev <= since && !memCursorMatches) {
+    return c.json({ ok: true, revision: latestRev, fullScanNeeded: false, changes: [] });
   }
 
-  const changes = since > 0
-    ? allChanges.filter((ch) => ch.rev > since)
-    : allChanges;
+  let changes = since > 0 ? allChanges.filter((ch) => ch.rev > since) : allChanges;
 
-  const oldestInRing =
-    allChanges.length > 0 ? allChanges[allChanges.length - 1].rev : 0;
-  const fullScanNeeded =
-    since > 0 && allChanges.length >= 100 && since < oldestInRing;
+  if (memCursorMatches && memCursor) {
+    changes = [
+      {
+        rev: memCursor.rev,
+        key: memCursor.key,
+        action: "cursor",
+        mtime: memCursor.rev,
+        cursor: memCursor.cursor,
+      },
+      ...changes,
+    ];
+  }
+
+  const oldestInRing = allChanges.length > 0 ? allChanges[allChanges.length - 1].rev : 0;
+  const fullScanNeeded = since > 0 && allChanges.length >= 100 && since < oldestInRing;
 
   return c.json({
     ok: true,
-    revision: latestRev,
+    revision: Math.max(latestRev, memCursor?.rev || 0),
     fullScanNeeded,
     changes,
   });
 });
 
-// Get file content or metadata
 app.get("/api/sync/file", async (c) => {
   const userId = c.get("userId");
   const vault = c.req.query("vault") || "default";
   const key = c.req.query("key") || "";
 
-  if (!isValidVaultName(vault)) {
-    return c.json({ error: "Invalid vault identifier." }, 400);
+  if (!isValidVaultName(vault) || !isValidFileKey(key)) {
+    return c.text("Invalid parameters", 400);
   }
 
-  if (!isValidFileKey(key)) {
-    return c.json({ error: "Invalid or unsafe file key parameter." }, 400);
-  }
-
-  const r2Key = `users/${userId}/vaults/${vault}/${key}`;
-  const obj = await c.env.CLOUDSYNC_BUCKET.get(r2Key);
-
-  if (!obj) {
-    return c.text("File not found", 404);
-  }
+  const obj = await c.env.CLOUDSYNC_BUCKET.get(`users/${userId}/vaults/${vault}/${key}`);
+  if (!obj) return c.text("File not found", 404);
 
   const headers = new Headers();
   obj.writeHttpMetadata(headers);
   headers.set("etag", obj.httpEtag);
-  if (obj.customMetadata?.mtime) {
-    headers.set("x-mtime", obj.customMetadata.mtime);
-  }
-  if (obj.customMetadata?.ctime) {
-    headers.set("x-ctime", obj.customMetadata.ctime);
-  }
+  if (obj.customMetadata?.mtime) headers.set("x-mtime", obj.customMetadata.mtime);
+  if (obj.customMetadata?.ctime) headers.set("x-ctime", obj.customMetadata.ctime);
   headers.set("content-length", `${obj.size}`);
 
   return new Response(obj.body, { headers });
 });
 
-// HEAD file metadata
 app.on("HEAD", "/api/sync/file", async (c) => {
   const userId = c.get("userId");
   const vault = c.req.query("vault") || "default";
   const key = c.req.query("key") || "";
 
-  if (!isValidVaultName(vault)) {
-    return c.text("Invalid vault identifier", 400);
+  if (!isValidVaultName(vault) || !isValidFileKey(key)) {
+    return c.text("Invalid parameters", 400);
   }
 
-  if (!isValidFileKey(key)) {
-    return c.text("Invalid or unsafe file key parameter", 400);
-  }
-
-  const r2Key = `users/${userId}/vaults/${vault}/${key}`;
-  const obj = await c.env.CLOUDSYNC_BUCKET.head(r2Key);
-
-  if (!obj) {
-    return c.text("File not found", 404);
-  }
+  const obj = await c.env.CLOUDSYNC_BUCKET.head(`users/${userId}/vaults/${vault}/${key}`);
+  if (!obj) return c.text("File not found", 404);
 
   const headers = new Headers();
   obj.writeHttpMetadata(headers);
   headers.set("etag", obj.httpEtag);
-  if (obj.customMetadata?.mtime) {
-    headers.set("x-mtime", obj.customMetadata.mtime);
-  }
-  if (obj.customMetadata?.ctime) {
-    headers.set("x-ctime", obj.customMetadata.ctime);
-  }
+  if (obj.customMetadata?.mtime) headers.set("x-mtime", obj.customMetadata.mtime);
+  if (obj.customMetadata?.ctime) headers.set("x-ctime", obj.customMetadata.ctime);
   headers.set("content-length", `${obj.size}`);
 
   return new Response(null, { headers });
 });
 
-// Upload file
 app.put("/api/sync/file", async (c) => {
   const userId = c.get("userId");
   const vault = c.req.query("vault") || "default";
   const key = c.req.query("key") || "";
 
-  if (!isValidVaultName(vault)) {
-    return c.json({ error: "Invalid vault identifier." }, 400);
-  }
-
-  if (!isValidFileKey(key)) {
-    return c.json({ error: "Invalid or unsafe file key parameter." }, 400);
+  if (!isValidVaultName(vault) || !isValidFileKey(key)) {
+    return c.json({ error: "Invalid parameters." }, 400);
   }
 
   const r2Key = `users/${userId}/vaults/${vault}/${key}`;
   const mtime = c.req.header("x-mtime") || `${Date.now()}`;
   const ctime = c.req.header("x-ctime") || mtime;
-  const contentType =
-    c.req.header("content-type") || "application/octet-stream";
+  const contentType = c.req.header("content-type") || "application/octet-stream";
   const body = await c.req.raw.arrayBuffer();
 
-  // Snapshot previous version to history if it exists
+  // Snapshot note history for text files under 2MB
   try {
-    const existing = await c.env.CLOUDSYNC_BUCKET.get(r2Key);
-    if (existing && existing.size > 0) {
-      const existingData = await existing.arrayBuffer();
-      const existingMtime = existing.customMetadata?.mtime || `${Date.now()}`;
-      const histKey = `users/${userId}/history/${vault}/${key}/${existingMtime}`;
-      await c.env.CLOUDSYNC_BUCKET.put(histKey, existingData, {
-        customMetadata: { mtime: existingMtime, size: `${existing.size}` },
-      });
+    const isDoc = /\.(md|markdown|canvas|txt|json|css|js|csv|tsv|yaml|yml)$/i.test(key);
+    if (isDoc) {
+      const existing = await c.env.CLOUDSYNC_BUCKET.get(r2Key);
+      if (existing && existing.size > 0 && existing.size <= 2 * 1024 * 1024) {
+        const histData = await existing.arrayBuffer();
+        const existingMtime = existing.customMetadata?.mtime || `${Date.now()}`;
+        await c.env.CLOUDSYNC_BUCKET.put(
+          `users/${userId}/history/${vault}/${key}/${existingMtime}`,
+          histData,
+          { customMetadata: { mtime: existingMtime, size: `${existing.size}` } }
+        );
+      }
     }
-  } catch (e) {
-    console.debug("Failed to snapshot file history:", e);
-  }
+  } catch {}
 
   const obj = await c.env.CLOUDSYNC_BUCKET.put(r2Key, body, {
     customMetadata: { mtime, ctime },
@@ -1618,10 +1059,7 @@ app.put("/api/sync/file", async (c) => {
   const cursorCh = c.req.header("x-cursor-ch");
   const cursor =
     cursorLine !== undefined && cursorCh !== undefined
-      ? {
-          line: Number.parseInt(cursorLine, 10),
-          ch: Number.parseInt(cursorCh, 10),
-        }
+      ? { line: Number.parseInt(cursorLine, 10), ch: Number.parseInt(cursorCh, 10) }
       : undefined;
 
   const rev = await recordVaultChange(
@@ -1645,7 +1083,6 @@ app.put("/api/sync/file", async (c) => {
   });
 });
 
-// Update cursor position only (ephemeral presence, zero R2 writes)
 app.put("/api/sync/cursor", async (c) => {
   const userId = c.get("userId");
   const vault = c.req.query("vault") || "default";
@@ -1653,134 +1090,83 @@ app.put("/api/sync/cursor", async (c) => {
   const lineStr = c.req.header("x-cursor-line");
   const chStr = c.req.header("x-cursor-ch");
 
-  if (!isValidVaultName(vault)) {
-    return c.json({ error: "Invalid vault identifier." }, 400);
+  if (!isValidVaultName(vault) || !isValidFileKey(key) || lineStr === undefined || chStr === undefined) {
+    return c.json({ error: "Invalid cursor coordinates" }, 400);
   }
 
-  if (!isValidFileKey(key) || lineStr === undefined || chStr === undefined) {
-    return c.json({ error: "Missing key or invalid cursor coordinates" }, 400);
-  }
-
-  const cursor = {
-    line: Number.parseInt(lineStr, 10),
-    ch: Number.parseInt(chStr, 10),
-  };
-
-  const rev = await recordVaultChange(
-    c.env,
-    userId,
-    vault,
-    key,
-    "cursor",
-    Date.now(),
-    undefined,
-    cursor
-  );
+  const cursor = { line: Number.parseInt(lineStr, 10), ch: Number.parseInt(chStr, 10) };
+  const rev = await recordVaultChange(c.env, userId, vault, key, "cursor", Date.now(), undefined, cursor);
 
   return c.json({ ok: true, revision: rev });
 });
 
-// Delete file or folder
 app.delete("/api/sync/file", async (c) => {
   const userId = c.get("userId");
   const vault = c.req.query("vault") || "default";
   const key = c.req.query("key") || "";
 
-  if (!isValidVaultName(vault)) {
-    return c.json({ error: "Invalid vault identifier." }, 400);
-  }
-
-  if (!isValidFileKey(key)) {
-    return c.json({ error: "Invalid or unsafe file key parameter." }, 400);
+  if (!isValidVaultName(vault) || !isValidFileKey(key)) {
+    return c.json({ error: "Invalid file key." }, 400);
   }
 
   const r2Key = `users/${userId}/vaults/${vault}/${key}`;
 
   if (key.endsWith("/")) {
-    // Delete folder contents recursively
     let cursor: string | undefined = undefined;
     let truncated = true;
     while (truncated) {
-      const list = await c.env.CLOUDSYNC_BUCKET.list({
-        prefix: r2Key,
-        cursor,
-        limit: 500,
-      });
+      const list = await c.env.CLOUDSYNC_BUCKET.list({ prefix: r2Key, cursor, limit: 500 });
       const toDelete = list.objects.map((o) => o.key);
-      if (toDelete.length > 0) {
-        await c.env.CLOUDSYNC_BUCKET.delete(toDelete);
-      }
+      if (toDelete.length > 0) await c.env.CLOUDSYNC_BUCKET.delete(toDelete);
       truncated = list.truncated;
       cursor = list.truncated ? list.cursor : undefined;
     }
-  }
-
-  // Preserve in Cloud Trash before deletion (unless folder)
-  if (!key.endsWith("/")) {
+  } else {
+    // Preserve in trash
     try {
-      const existingObj = await c.env.CLOUDSYNC_BUCKET.get(r2Key);
-      if (existingObj) {
-        const data = await existingObj.arrayBuffer();
-        const trashKey = `users/${userId}/trash/${vault}/${key}`;
-        await c.env.CLOUDSYNC_BUCKET.put(trashKey, data, {
-          customMetadata: {
-            ...existingObj.customMetadata,
-            deletedAt: `${Date.now()}`,
-          },
+      const existing = await c.env.CLOUDSYNC_BUCKET.get(r2Key);
+      if (existing) {
+        const data = await existing.arrayBuffer();
+        await c.env.CLOUDSYNC_BUCKET.put(`users/${userId}/trash/${vault}/${key}`, data, {
+          customMetadata: { ...existing.customMetadata, deletedAt: `${Date.now()}` },
         });
       }
-    } catch (err) {
-      console.error("Failed to copy to trash:", err);
-    }
+    } catch {}
   }
 
   await c.env.CLOUDSYNC_BUCKET.delete(r2Key);
-  const rev = await recordVaultChange(
-    c.env,
-    userId,
-    vault,
-    key,
-    "delete",
-    Date.now()
-  );
+  const rev = await recordVaultChange(c.env, userId, vault, key, "delete", Date.now());
 
   return c.json({ ok: true, revision: rev });
 });
 
-// Rename file
 app.post("/api/sync/rename", async (c) => {
   const userId = c.get("userId");
   const vault = c.req.query("vault") || "default";
-
-  if (!isValidVaultName(vault)) {
-    return c.json({ error: "Invalid vault identifier." }, 400);
-  }
+  if (!isValidVaultName(vault)) return c.json({ error: "Invalid vault." }, 400);
 
   let body: { from?: string; to?: string };
   try {
     body = await c.req.json();
   } catch {
-    return c.json({ error: "Invalid JSON payload." }, 400);
+    return c.json({ error: "Invalid JSON." }, 400);
   }
 
   if (!body.from || !body.to || !isValidFileKey(body.from) || !isValidFileKey(body.to)) {
-    return c.json({ error: "Both 'from' and 'to' must be valid, safe file keys." }, 400);
+    return c.json({ error: "Invalid file paths." }, 400);
   }
 
   const sourceKey = `users/${userId}/vaults/${vault}/${body.from}`;
   const targetKey = `users/${userId}/vaults/${vault}/${body.to}`;
 
-  const sourceObj = await c.env.CLOUDSYNC_BUCKET.get(sourceKey);
-  if (!sourceObj) {
-    return c.json({ error: "Source file not found" }, 404);
-  }
+  const source = await c.env.CLOUDSYNC_BUCKET.get(sourceKey);
+  if (!source) return c.json({ error: "Source not found" }, 404);
 
-  const content = await sourceObj.arrayBuffer();
+  const content = await source.arrayBuffer();
   await c.env.CLOUDSYNC_BUCKET.put(targetKey, content, {
-    customMetadata: sourceObj.customMetadata,
-    httpMetadata: sourceObj.httpMetadata,
+    customMetadata: source.customMetadata,
+    httpMetadata: source.httpMetadata,
   });
-
   await c.env.CLOUDSYNC_BUCKET.delete(sourceKey);
 
   await recordVaultChange(c.env, userId, vault, body.from, "delete", Date.now());
@@ -1790,25 +1176,18 @@ app.post("/api/sync/rename", async (c) => {
     vault,
     body.to,
     "put",
-    Number.parseInt(sourceObj.customMetadata?.mtime || `${Date.now()}`, 10),
+    Number.parseInt(source.customMetadata?.mtime || `${Date.now()}`, 10),
     content.byteLength
   );
 
   return c.json({ ok: true, revision: rev });
 });
 
-// =============================================================================
-// CLOUD TRASH / DELETED FILES RECOVERY
-// =============================================================================
-
-// List deleted files
+// Trash recovery
 app.get("/api/sync/trash", async (c) => {
   const userId = c.get("userId");
   const vault = c.req.query("vault") || "default";
-
-  if (!isValidVaultName(vault)) {
-    return c.json({ error: "Invalid vault identifier." }, 400);
-  }
+  if (!isValidVaultName(vault)) return c.json({ error: "Invalid vault." }, 400);
 
   const prefix = `users/${userId}/trash/${vault}/`;
   const list = await c.env.CLOUDSYNC_BUCKET.list({ prefix, limit: 200 });
@@ -1825,72 +1204,45 @@ app.get("/api/sync/trash", async (c) => {
   return c.json({ ok: true, files });
 });
 
-// Restore deleted file
 app.post("/api/sync/trash/restore", async (c) => {
   const userId = c.get("userId");
   const vault = c.req.query("vault") || "default";
-
-  if (!isValidVaultName(vault)) {
-    return c.json({ error: "Invalid vault identifier." }, 400);
-  }
+  if (!isValidVaultName(vault)) return c.json({ error: "Invalid vault." }, 400);
 
   let body: { key?: string };
   try {
     body = await c.req.json();
   } catch {
-    return c.json({ error: "Invalid JSON payload." }, 400);
+    return c.json({ error: "Invalid JSON." }, 400);
   }
 
   const key = (body?.key || "").trim();
-  if (!isValidFileKey(key)) {
-    return c.json({ error: "Invalid file key parameter." }, 400);
-  }
+  if (!isValidFileKey(key)) return c.json({ error: "Invalid key." }, 400);
 
   const trashKey = `users/${userId}/trash/${vault}/${key}`;
   const targetKey = `users/${userId}/vaults/${vault}/${key}`;
 
   const trashObj = await c.env.CLOUDSYNC_BUCKET.get(trashKey);
-  if (!trashObj) {
-    return c.json({ error: "Deleted file not found in trash." }, 404);
-  }
+  if (!trashObj) return c.json({ error: "File not found in trash." }, 404);
 
   const data = await trashObj.arrayBuffer();
   const mtime = Date.now();
   await c.env.CLOUDSYNC_BUCKET.put(targetKey, data, {
     customMetadata: { mtime: `${mtime}` },
   });
-
   await c.env.CLOUDSYNC_BUCKET.delete(trashKey);
 
-  const rev = await recordVaultChange(
-    c.env,
-    userId,
-    vault,
-    key,
-    "put",
-    mtime,
-    data.byteLength
-  );
-
+  const rev = await recordVaultChange(c.env, userId, vault, key, "put", mtime, data.byteLength);
   return c.json({ ok: true, key, revision: rev });
 });
 
-// =============================================================================
-// FILE VERSION HISTORY (Per-note cloud revisions)
-// =============================================================================
-
-// List historical versions for a file
+// History versions
 app.get("/api/sync/history", async (c) => {
   const userId = c.get("userId");
   const vault = c.req.query("vault") || "default";
   const key = c.req.query("key") || "";
 
-  if (!isValidVaultName(vault)) {
-    return c.json({ error: "Invalid vault identifier." }, 400);
-  }
-  if (!isValidFileKey(key)) {
-    return c.json({ error: "Invalid file key parameter." }, 400);
-  }
+  if (!isValidVaultName(vault) || !isValidFileKey(key)) return c.json({ error: "Invalid parameters." }, 400);
 
   const prefix = `users/${userId}/history/${vault}/${key}/`;
   const list = await c.env.CLOUDSYNC_BUCKET.list({ prefix, limit: 100 });
@@ -1898,19 +1250,13 @@ app.get("/api/sync/history", async (c) => {
   const versions = list.objects.map((o) => {
     const versionId = o.key.slice(prefix.length);
     const ts = Number.parseInt(versionId, 10) || o.uploaded.getTime();
-    return {
-      versionId,
-      timestamp: ts,
-      size: o.size,
-    };
+    return { versionId, timestamp: ts, size: o.size };
   });
 
-  // Sort newest first
   versions.sort((a, b) => b.timestamp - a.timestamp);
   return c.json({ ok: true, key, versions });
 });
 
-// Get content of a specific historical version
 app.get("/api/sync/history/version", async (c) => {
   const userId = c.get("userId");
   const vault = c.req.query("vault") || "default";
@@ -1923,19 +1269,13 @@ app.get("/api/sync/history/version", async (c) => {
 
   const histKey = `users/${userId}/history/${vault}/${key}/${versionId}`;
   const obj = await c.env.CLOUDSYNC_BUCKET.get(histKey);
-  if (!obj) {
-    return c.json({ error: "Historical version not found." }, 404);
-  }
+  if (!obj) return c.json({ error: "Historical version not found." }, 404);
 
-  c.header(
-    "Content-Type",
-    obj.httpMetadata?.contentType || "application/octet-stream"
-  );
+  c.header("Content-Type", obj.httpMetadata?.contentType || "application/octet-stream");
   c.header("Content-Length", `${obj.size}`);
   return c.body(obj.body);
 });
 
-// Restore a historical version as active note
 app.post("/api/sync/history/restore", async (c) => {
   const userId = c.get("userId");
   const vault = c.req.query("vault") || "default";
@@ -1944,149 +1284,98 @@ app.post("/api/sync/history/restore", async (c) => {
   try {
     body = await c.req.json();
   } catch {
-    return c.json({ error: "Invalid JSON payload." }, 400);
+    return c.json({ error: "Invalid JSON." }, 400);
   }
 
   const key = (body?.key || "").trim();
   const versionId = (body?.versionId || "").trim();
-
   if (!isValidVaultName(vault) || !isValidFileKey(key) || !versionId) {
     return c.json({ error: "Invalid parameters." }, 400);
   }
 
-  const histKey = `users/${userId}/history/${vault}/${key}/${versionId}`;
-  const targetKey = `users/${userId}/vaults/${vault}/${key}`;
+  const hist = await c.env.CLOUDSYNC_BUCKET.get(`users/${userId}/history/${vault}/${key}/${versionId}`);
+  if (!hist) return c.json({ error: "Version not found." }, 404);
 
-  const histObj = await c.env.CLOUDSYNC_BUCKET.get(histKey);
-  if (!histObj) {
-    return c.json({ error: "Version not found." }, 404);
-  }
-
-  const data = await histObj.arrayBuffer();
+  const data = await hist.arrayBuffer();
   const mtime = Date.now();
-
-  await c.env.CLOUDSYNC_BUCKET.put(targetKey, data, {
+  await c.env.CLOUDSYNC_BUCKET.put(`users/${userId}/vaults/${vault}/${key}`, data, {
     customMetadata: { mtime: `${mtime}` },
   });
 
-  const rev = await recordVaultChange(
-    c.env,
-    userId,
-    vault,
-    key,
-    "put",
-    mtime,
-    data.byteLength
-  );
-
+  const rev = await recordVaultChange(c.env, userId, vault, key, "put", mtime, data.byteLength);
   return c.json({ ok: true, key, revision: rev });
 });
 
-// =============================================================================
-// VAULT SHARING / COLLABORATION
-// =============================================================================
-
-// List collaborators
+// Shares
 app.get("/api/sync/shares", async (c) => {
   const userId = c.get("userId");
   const vault = c.req.query("vault") || "default";
+  if (!isValidVaultName(vault)) return c.json({ error: "Invalid vault." }, 400);
 
-  if (!isValidVaultName(vault)) {
-    return c.json({ error: "Invalid vault identifier." }, 400);
-  }
-
-  const sharesKey = `vault_shares:${userId}:${vault}`;
-  const raw = await c.env.CLOUDSYNC_KV.get(sharesKey);
+  const raw = await getStoredData(c, `vault_shares:${userId}:${vault}`);
   const shares: string[] = raw ? JSON.parse(raw) : [];
-
   return c.json({ ok: true, vault, shares });
 });
 
-// Invite collaborator
 app.post("/api/sync/shares", async (c) => {
   const userId = c.get("userId");
   const currentUsername = c.get("username");
   const vault = c.req.query("vault") || "default";
-
-  if (!isValidVaultName(vault)) {
-    return c.json({ error: "Invalid vault identifier." }, 400);
-  }
+  if (!isValidVaultName(vault)) return c.json({ error: "Invalid vault." }, 400);
 
   let body: { inviteUsername?: string };
   try {
     body = await c.req.json();
   } catch {
-    return c.json({ error: "Invalid JSON payload." }, 400);
+    return c.json({ error: "Invalid JSON." }, 400);
   }
 
   const inviteUsername = (body?.inviteUsername || "").trim();
   if (!inviteUsername || !isValidUsername(inviteUsername)) {
     return c.json({ error: "Valid username is required." }, 400);
   }
-
   if (inviteUsername.toLowerCase() === currentUsername.toLowerCase()) {
     return c.json({ error: "You cannot invite yourself." }, 400);
   }
 
-  const inviteUserKey = `user:${inviteUsername.toLowerCase()}`;
-  const inviteUserRaw = await c.env.CLOUDSYNC_KV.get(inviteUserKey);
-  if (!inviteUserRaw) {
-    return c.json({ error: `User "${inviteUsername}" does not exist.` }, 404);
-  }
+  const inviteUser = await getStoredData(c, `user:${inviteUsername.toLowerCase()}`);
+  if (!inviteUser) return c.json({ error: `User "${inviteUsername}" does not exist.` }, 404);
 
   const sharesKey = `vault_shares:${userId}:${vault}`;
-  const raw = await c.env.CLOUDSYNC_KV.get(sharesKey);
-  let shares: string[] = raw ? JSON.parse(raw) : [];
+  const raw = await getStoredData(c, sharesKey);
+  const shares: string[] = raw ? JSON.parse(raw) : [];
 
   if (!shares.some((u) => u.toLowerCase() === inviteUsername.toLowerCase())) {
     shares.push(inviteUsername);
-    await c.env.CLOUDSYNC_KV.put(sharesKey, JSON.stringify(shares));
+    await putStoredData(c, sharesKey, JSON.stringify(shares));
   }
 
   return c.json({ ok: true, message: `Vault shared with ${inviteUsername}`, shares });
 });
 
-// Remove collaborator
 app.delete("/api/sync/shares", async (c) => {
   const userId = c.get("userId");
   const vault = c.req.query("vault") || "default";
   const username = c.req.query("username");
-
-  if (!isValidVaultName(vault) || !username) {
-    return c.json({ error: "Invalid parameters." }, 400);
-  }
+  if (!isValidVaultName(vault) || !username) return c.json({ error: "Invalid parameters." }, 400);
 
   const sharesKey = `vault_shares:${userId}:${vault}`;
-  const raw = await c.env.CLOUDSYNC_KV.get(sharesKey);
+  const raw = await getStoredData(c, sharesKey);
   let shares: string[] = raw ? JSON.parse(raw) : [];
   shares = shares.filter((u) => u.toLowerCase() !== username.toLowerCase());
-  await c.env.CLOUDSYNC_KV.put(sharesKey, JSON.stringify(shares));
+  await putStoredData(c, sharesKey, JSON.stringify(shares));
 
   return c.json({ ok: true, shares });
 });
 
-interface DeviceInfo {
-  deviceId: string;
-  deviceName: string;
-  platform: "desktop" | "mobile" | "unknown";
-  lastActive: number;
-  lastBackup?: number;
-  fileCount?: number;
-}
-
-// List all registered devices for this vault
+// Devices
 app.get("/api/sync/devices", async (c) => {
   const userId = c.get("userId");
   const vault = c.req.query("vault") || "default";
-
-  if (!isValidVaultName(vault)) {
-    return c.json({ error: "Invalid vault identifier." }, 400);
-  }
-
-  const devicesKey = `vault_devices:${userId}:${vault}`;
+  if (!isValidVaultName(vault)) return c.json({ error: "Invalid vault." }, 400);
 
   try {
-    const raw = await c.env.CLOUDSYNC_KV.get(devicesKey);
+    const raw = await getStoredData(c, `vault_devices:${userId}:${vault}`);
     const devices: DeviceInfo[] = raw ? JSON.parse(raw) : [];
     return c.json({ devices });
   } catch (err: any) {
@@ -2094,86 +1383,61 @@ app.get("/api/sync/devices", async (c) => {
   }
 });
 
-// Register or update device heartbeat / backup metadata
 app.put("/api/sync/devices", async (c) => {
   const userId = c.get("userId");
   const vault = c.req.query("vault") || "default";
-
-  if (!isValidVaultName(vault)) {
-    return c.json({ error: "Invalid vault identifier." }, 400);
-  }
-
-  const devicesKey = `vault_devices:${userId}:${vault}`;
+  if (!isValidVaultName(vault)) return c.json({ error: "Invalid vault." }, 400);
 
   let body: any;
   try {
     body = await c.req.json();
   } catch {
-    return c.json({ error: "Invalid JSON payload." }, 400);
+    return c.json({ error: "Invalid JSON." }, 400);
   }
 
-  if (!body || !body.deviceId || typeof body.deviceId !== "string" || !/^[a-zA-Z0-9._-]{1,64}$/.test(body.deviceId)) {
+  if (!body?.deviceId || typeof body.deviceId !== "string" || !/^[a-zA-Z0-9._-]{1,64}$/.test(body.deviceId)) {
     return c.json({ error: "Invalid deviceId" }, 400);
   }
 
+  const devicesKey = `vault_devices:${userId}:${vault}`;
   try {
-    const raw = await c.env.CLOUDSYNC_KV.get(devicesKey);
+    const raw = await getStoredData(c, devicesKey);
     let devices: DeviceInfo[] = raw ? JSON.parse(raw) : [];
-    const index = devices.findIndex((d) => d.deviceId === body.deviceId);
-    const now = Date.now();
-    const updatedDevice: DeviceInfo = {
+    const idx = devices.findIndex((d) => d.deviceId === body.deviceId);
+    const updated: DeviceInfo = {
       deviceId: body.deviceId,
       deviceName: String(body.deviceName || "Unnamed Device").slice(0, 64),
       platform: body.platform === "desktop" || body.platform === "mobile" ? body.platform : "unknown",
-      lastActive: now,
-      lastBackup:
-        body.lastBackup !== undefined && typeof body.lastBackup === "number"
-          ? body.lastBackup
-          : index >= 0
-          ? devices[index].lastBackup
-          : undefined,
-      fileCount:
-        body.fileCount !== undefined && typeof body.fileCount === "number"
-          ? body.fileCount
-          : index >= 0
-          ? devices[index].fileCount
-          : undefined,
+      lastActive: Date.now(),
+      lastBackup: body.lastBackup ?? (idx >= 0 ? devices[idx].lastBackup : undefined),
+      fileCount: body.fileCount ?? (idx >= 0 ? devices[idx].fileCount : undefined),
     };
 
-    if (index >= 0) {
-      devices[index] = { ...devices[index], ...updatedDevice };
-    } else {
-      devices.push(updatedDevice);
-    }
+    if (idx >= 0) devices[idx] = updated;
+    else devices.push(updated);
 
-    await c.env.CLOUDSYNC_KV.put(devicesKey, JSON.stringify(devices));
-    return c.json({ ok: true, device: updatedDevice });
+    await putStoredData(c, devicesKey, JSON.stringify(devices));
+    return c.json({ ok: true, device: updated });
   } catch (err: any) {
     return c.json({ error: err?.message }, 500);
   }
 });
 
-// Unregister a device
 app.delete("/api/sync/devices/:deviceId", async (c) => {
   const userId = c.get("userId");
   const vault = c.req.query("vault") || "default";
   const deviceId = c.req.param("deviceId");
 
-  if (!isValidVaultName(vault)) {
-    return c.json({ error: "Invalid vault identifier." }, 400);
-  }
-
-  if (!deviceId || !/^[a-zA-Z0-9._-]{1,64}$/.test(deviceId)) {
-    return c.json({ error: "Invalid deviceId" }, 400);
+  if (!isValidVaultName(vault) || !deviceId) {
+    return c.json({ error: "Invalid parameters." }, 400);
   }
 
   const devicesKey = `vault_devices:${userId}:${vault}`;
-
   try {
-    const raw = await c.env.CLOUDSYNC_KV.get(devicesKey);
+    const raw = await getStoredData(c, devicesKey);
     let devices: DeviceInfo[] = raw ? JSON.parse(raw) : [];
     devices = devices.filter((d) => d.deviceId !== deviceId);
-    await c.env.CLOUDSYNC_KV.put(devicesKey, JSON.stringify(devices));
+    await putStoredData(c, devicesKey, JSON.stringify(devices));
     return c.json({ ok: true });
   } catch (err: any) {
     return c.json({ error: err?.message }, 500);
