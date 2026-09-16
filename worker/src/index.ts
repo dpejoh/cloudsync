@@ -1208,6 +1208,190 @@ async function recordVaultChange(
   return rev;
 }
 
+// =============================================================================
+// Vault Management Endpoints (List, Create, Delete Remote Vaults)
+// =============================================================================
+
+// List all remote vaults for user
+app.get("/api/vaults", async (c) => {
+  const userId = c.get("userId");
+  const vaultNamesSet = new Set<string>();
+
+  // 1. Delimited prefixes in R2 (Source of Truth)
+  try {
+    const listed = await c.env.CLOUDSYNC_BUCKET.list({
+      prefix: `users/${userId}/vaults/`,
+      delimiter: "/",
+    });
+    if (listed.delimitedPrefixes) {
+      for (const p of listed.delimitedPrefixes) {
+        const parts = p.split("/");
+        const name = parts[3];
+        if (name && isValidVaultName(name)) {
+          vaultNamesSet.add(name);
+        }
+      }
+    }
+  } catch (err) {
+    console.error("Failed to list R2 vault prefixes:", err);
+  }
+
+  // 2. Check KV registered vaults ONLY if they actually have at least 1 object in R2
+  // (Prevents ghost vaults caused by Cloudflare KV free-tier daily write limits)
+  try {
+    const userVaultsKey = `user_vaults:${userId}`;
+    const rawVaults = await c.env.CLOUDSYNC_KV.get(userVaultsKey);
+    if (rawVaults) {
+      const arr = JSON.parse(rawVaults);
+      if (Array.isArray(arr)) {
+        for (const v of arr) {
+          if (typeof v === "string" && isValidVaultName(v) && !vaultNamesSet.has(v)) {
+            const check = await c.env.CLOUDSYNC_BUCKET.list({
+              prefix: `users/${userId}/vaults/${v}/`,
+              limit: 1,
+            });
+            if (check.objects && check.objects.length > 0) {
+              vaultNamesSet.add(v);
+            }
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.warn("KV vault check skipped:", err);
+  }
+
+  const vaultNames = Array.from(vaultNamesSet);
+  const vaults = await Promise.all(
+    vaultNames.map(async (name) => {
+      let revision = 0;
+      try {
+        const revKey = `vault_rev:${userId}:${name}`;
+        const revVal = await c.env.CLOUDSYNC_KV.get(revKey);
+        if (revVal) revision = Number.parseInt(revVal, 10);
+      } catch {}
+      return { name, revision };
+    })
+  );
+
+  return c.json({ ok: true, vaults });
+});
+
+// Create a new remote vault
+app.post("/api/vaults", async (c) => {
+  const userId = c.get("userId");
+
+  let body: { name?: string };
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "Invalid JSON payload." }, 400);
+  }
+
+  const name = (body?.name || "").trim();
+  if (!name || !isValidVaultName(name)) {
+    return c.json(
+      { error: "Invalid vault name. Use 1-64 alphanumeric characters, dashes, or underscores." },
+      400
+    );
+  }
+
+  // 1. Create vault marker in R2 (Primary truth - 1,000,000 ops/month)
+  try {
+    await c.env.CLOUDSYNC_BUCKET.put(
+      `users/${userId}/vaults/${name}/.cloudsync`,
+      JSON.stringify({ created: Date.now(), name }),
+      { customMetadata: { created: `${Date.now()}` } }
+    );
+  } catch (err) {
+    console.error("Failed to write R2 vault marker:", err);
+  }
+
+  // 2. Best-effort registration in KV (wrapped in try/catch to never fail on KV limit)
+  try {
+    const userVaultsKey = `user_vaults:${userId}`;
+    const rawVaults = await c.env.CLOUDSYNC_KV.get(userVaultsKey);
+    let arr: string[] = [];
+    if (rawVaults) {
+      try {
+        arr = JSON.parse(rawVaults);
+        if (!Array.isArray(arr)) arr = [];
+      } catch {
+        arr = [];
+      }
+    }
+
+    if (!arr.includes(name)) {
+      arr.push(name);
+      await c.env.CLOUDSYNC_KV.put(userVaultsKey, JSON.stringify(arr));
+    }
+  } catch (err) {
+    console.warn("KV registration skipped due to KV limits:", err);
+  }
+
+  return c.json({ ok: true, name });
+});
+
+// Delete a remote vault
+app.delete("/api/vaults/:vaultName", async (c) => {
+  const userId = c.get("userId");
+  const vaultName = c.req.param("vaultName");
+
+  if (!vaultName || !isValidVaultName(vaultName)) {
+    return c.json({ error: "Invalid vault identifier." }, 400);
+  }
+
+  // 1. Delete all R2 files under this vault (including .cloudsync marker)
+  try {
+    const prefixes = [
+      `users/${userId}/vaults/${vaultName}/`,
+      `users/${userId}/history/${vaultName}/`,
+      `users/${userId}/trash/${vaultName}/`,
+    ];
+    for (const prefix of prefixes) {
+      let truncated = true;
+      let cursor: string | undefined = undefined;
+      while (truncated) {
+        const listRes = await c.env.CLOUDSYNC_BUCKET.list({ prefix, cursor, limit: 500 });
+        const keys = listRes.objects.map((o) => o.key);
+        if (keys.length > 0) {
+          await c.env.CLOUDSYNC_BUCKET.delete(keys);
+        }
+        truncated = listRes.truncated;
+        cursor = listRes.truncated ? listRes.cursor : undefined;
+      }
+    }
+    // Also ensure any non-directory key matching vaultName is purged
+    await Promise.allSettled([
+      c.env.CLOUDSYNC_BUCKET.delete(`users/${userId}/vaults/${vaultName}`),
+      c.env.CLOUDSYNC_BUCKET.delete(`users/${userId}/vaults/${vaultName}/`),
+    ]);
+  } catch (err) {
+    console.error("Failed to delete R2 vault files:", err);
+  }
+
+  // 2. Best-effort cleanup from KV (never fails deletion if KV is rate-limited)
+  try {
+    const userVaultsKey = `user_vaults:${userId}`;
+    const rawVaults = await c.env.CLOUDSYNC_KV.get(userVaultsKey);
+    if (rawVaults) {
+      let arr: string[] = JSON.parse(rawVaults);
+      arr = arr.filter((v) => v !== vaultName && v.toLowerCase() !== vaultName.toLowerCase());
+      await c.env.CLOUDSYNC_KV.put(userVaultsKey, JSON.stringify(arr));
+    }
+    await Promise.allSettled([
+      c.env.CLOUDSYNC_KV.delete(`vault_rev:${userId}:${vaultName}`),
+      c.env.CLOUDSYNC_KV.delete(`vault_changes:${userId}:${vaultName}`),
+      c.env.CLOUDSYNC_KV.delete(`vault_shares:${userId}:${vaultName}`),
+      c.env.CLOUDSYNC_KV.delete(`vault_devices:${userId}:${vaultName}`),
+    ]);
+  } catch (err) {
+    console.warn("KV cleanup skipped due to KV limits:", err);
+  }
+
+  return c.json({ ok: true, deleted: vaultName });
+});
+
 // List all files in vault (Walk)
 app.get("/api/sync/walk", async (c) => {
   const userId = c.get("userId");
@@ -1241,6 +1425,7 @@ app.get("/api/sync/walk", async (c) => {
 
     for (const obj of list.objects) {
       const relKey = obj.key.slice(prefix.length);
+      if (relKey === ".cloudsync" || relKey === "") continue;
       const mtime = obj.customMetadata?.mtime
         ? Number.parseInt(obj.customMetadata.mtime, 10)
         : obj.uploaded.getTime();
@@ -1880,7 +2065,7 @@ app.delete("/api/sync/shares", async (c) => {
   return c.json({ ok: true, shares });
 });
 
-export interface DeviceInfo {
+interface DeviceInfo {
   deviceId: string;
   deviceName: string;
   platform: "desktop" | "mobile" | "unknown";
