@@ -3,7 +3,7 @@ import { cors } from "hono/cors";
 
 type Bindings = {
   CLOUDSYNC_BUCKET: R2Bucket;
-  CLOUDSYNC_KV?: KVNamespace;
+  CLOUDSYNC_KV: KVNamespace;
   JWT_SECRET?: string;
   WORKER_MODE?: string; // "single" | "multi"
   SINGLE_USER_PASSWORD?: string;
@@ -43,11 +43,6 @@ app.use("*", async (c, next) => {
   c.header("X-Content-Type-Options", "nosniff");
   c.header("X-Frame-Options", "DENY");
   c.header("Referrer-Policy", "no-referrer");
-});
-
-app.onError((err, c) => {
-  console.error("Worker unhandled error:", err);
-  return c.json({ error: err.message || "Internal server error", stack: err.stack }, 500);
 });
 
 app.use(
@@ -239,64 +234,6 @@ function isValidFileKey(key: string): boolean {
   return true;
 }
 
-function toStorageKey(key: string): string {
-  return `_system_store/${key.replace(/[^a-zA-Z0-9._-]/g, "_")}.json`;
-}
-
-async function getStoredData(c: any, key: string): Promise<string | null> {
-  if (c.env.CLOUDSYNC_KV) {
-    try {
-      const val = await c.env.CLOUDSYNC_KV.get(key);
-      if (val !== null && val !== undefined) return val;
-    } catch (e) {
-      console.warn("KV get failed, falling back to bucket:", e);
-    }
-  }
-  if (c.env.CLOUDSYNC_BUCKET) {
-    try {
-      const obj = await c.env.CLOUDSYNC_BUCKET.get(toStorageKey(key));
-      if (obj) {
-        return await obj.text();
-      }
-    } catch (e) {
-      console.warn("Bucket get failed for system key:", e);
-    }
-  }
-  return null;
-}
-
-async function putStoredData(c: any, key: string, value: string): Promise<void> {
-  if (c.env.CLOUDSYNC_BUCKET) {
-    try {
-      await c.env.CLOUDSYNC_BUCKET.put(toStorageKey(key), value, {
-        httpMetadata: { contentType: "application/json" },
-      });
-    } catch (e) {
-      console.error("Bucket put failed for system key:", e);
-    }
-  }
-  if (c.env.CLOUDSYNC_KV) {
-    try {
-      await c.env.CLOUDSYNC_KV.put(key, value);
-    } catch (e) {
-      console.warn("KV put quota limit exceeded, securely using R2 storage:", e);
-    }
-  }
-}
-
-async function deleteStoredData(c: any, key: string): Promise<void> {
-  if (c.env.CLOUDSYNC_BUCKET) {
-    try {
-      await c.env.CLOUDSYNC_BUCKET.delete(toStorageKey(key));
-    } catch {}
-  }
-  if (c.env.CLOUDSYNC_KV) {
-    try {
-      await c.env.CLOUDSYNC_KV.delete(key);
-    } catch {}
-  }
-}
-
 let lastAssignedRev = 0;
 function getNextRevision(): number {
   const now = Date.now();
@@ -392,9 +329,11 @@ app.get("/api/info", async (c) => {
   if (mode === "single") {
     if (c.env.SINGLE_USER_PASSWORD) {
       hasPassword = true;
-    } else {
-      const stored = await getStoredData(c, "single:verifier");
+    } else if (c.env.CLOUDSYNC_KV) {
+      const stored = await c.env.CLOUDSYNC_KV.get("single:verifier");
       hasPassword = !!stored;
+    } else {
+      hasPassword = false;
     }
   }
   return c.json({
@@ -428,13 +367,15 @@ app.post("/api/auth/single-login", async (c) => {
   const secret = c.env.JWT_SECRET || "cloudsync-secret-change-me";
   const hashed = await hashVerifier(verifier, secret);
 
-  let stored = await getStoredData(c, "single:verifier");
-  if (!stored) {
-    await putStoredData(c, "single:verifier", hashed);
-    stored = hashed;
-  }
-  if (stored !== hashed && stored !== verifier.toLowerCase()) {
-    return c.json({ error: "Invalid master password." }, 401);
+  if (c.env.CLOUDSYNC_KV) {
+    let stored = await c.env.CLOUDSYNC_KV.get("single:verifier");
+    if (!stored) {
+      await c.env.CLOUDSYNC_KV.put("single:verifier", hashed);
+      stored = hashed;
+    }
+    if (stored !== hashed && stored !== verifier.toLowerCase()) {
+      return c.json({ error: "Invalid master password." }, 401);
+    }
   }
 
   const token = await signJwt(
@@ -478,9 +419,11 @@ app.post("/api/auth/register", async (c) => {
   const secret = c.env.JWT_SECRET || "cloudsync-secret-change-me";
   const userKey = `user:${username.toLowerCase()}`;
 
-  const existing = await getStoredData(c, userKey);
-  if (existing) {
-    return c.json({ error: "Username already taken." }, 409);
+  if (c.env.CLOUDSYNC_KV) {
+    const existing = await c.env.CLOUDSYNC_KV.get(userKey);
+    if (existing) {
+      return c.json({ error: "Username already taken." }, 409);
+    }
   }
 
   const userId = crypto.randomUUID();
@@ -493,7 +436,9 @@ app.post("/api/auth/register", async (c) => {
     created: Date.now(),
   };
 
-  await putStoredData(c, userKey, JSON.stringify(userData));
+  if (c.env.CLOUDSYNC_KV) {
+    await c.env.CLOUDSYNC_KV.put(userKey, JSON.stringify(userData));
+  }
 
   const token = await signJwt(
     { sub: userId, username, exp: Math.floor(Date.now() / 1000) + 86400 * 180 },
@@ -527,11 +472,13 @@ app.post("/api/auth/login", async (c) => {
   const userKey = `user:${username.toLowerCase()}`;
   let user: any = null;
 
-  const raw = await getStoredData(c, userKey);
-  if (raw) {
-    try {
-      user = JSON.parse(raw);
-    } catch {}
+  if (c.env.CLOUDSYNC_KV) {
+    const raw = await c.env.CLOUDSYNC_KV.get(userKey);
+    if (raw) {
+      try {
+        user = JSON.parse(raw);
+      } catch {}
+    }
   }
 
   if (!user) {
@@ -581,11 +528,13 @@ app.post("/api/auth/recover", async (c) => {
   const userKey = `user:${username.toLowerCase()}`;
   let user: any = null;
 
-  const raw = await getStoredData(c, userKey);
-  if (raw) {
-    try {
-      user = JSON.parse(raw);
-    } catch {}
+  if (c.env.CLOUDSYNC_KV) {
+    const raw = await c.env.CLOUDSYNC_KV.get(userKey);
+    if (raw) {
+      try {
+        user = JSON.parse(raw);
+      } catch {}
+    }
   }
 
   if (!user || !user.recoveryVerifier) {
@@ -598,7 +547,9 @@ app.post("/api/auth/recover", async (c) => {
   }
 
   user.verifier = await hashVerifier(newVerifier, secret);
-  await putStoredData(c, userKey, JSON.stringify(user));
+  if (c.env.CLOUDSYNC_KV) {
+    await c.env.CLOUDSYNC_KV.put(userKey, JSON.stringify(user));
+  }
 
   const token = await signJwt(
     { sub: user.id, username: user.username, exp: Math.floor(Date.now() / 1000) + 86400 * 180 },
@@ -666,8 +617,8 @@ app.get("/api/user/me", async (c) => {
   }
 
   let has2FA = false;
-  if (username && username !== "Owner") {
-    const raw = await getStoredData(c, `user:${username.toLowerCase()}`);
+  if (c.env.CLOUDSYNC_KV && username && username !== "Owner") {
+    const raw = await c.env.CLOUDSYNC_KV.get(`user:${username.toLowerCase()}`);
     if (raw) {
       try {
         const u = JSON.parse(raw);
@@ -708,12 +659,12 @@ app.post("/api/user/setup-2fa", async (c) => {
   }
 
   const userKey = `user:${username.toLowerCase()}`;
-  const raw = await getStoredData(c, userKey);
+  const raw = await c.env.CLOUDSYNC_KV.get(userKey);
   if (!raw) return c.json({ error: "User not found." }, 404);
 
   const user = JSON.parse(raw);
   user.totpSecret = totpSecret;
-  await putStoredData(c, userKey, JSON.stringify(user));
+  await c.env.CLOUDSYNC_KV.put(userKey, JSON.stringify(user));
 
   return c.json({ ok: true, message: "Two-factor authentication enabled." });
 });
@@ -729,7 +680,7 @@ app.post("/api/user/disable-2fa", async (c) => {
 
   const totpCode = (body?.totpCode || "").trim();
   const userKey = `user:${username.toLowerCase()}`;
-  const raw = await getStoredData(c, userKey);
+  const raw = await c.env.CLOUDSYNC_KV.get(userKey);
   if (!raw) return c.json({ error: "User not found." }, 404);
 
   const user = JSON.parse(raw);
@@ -739,7 +690,7 @@ app.post("/api/user/disable-2fa", async (c) => {
   if (!valid) return c.json({ error: "Invalid 2FA code." }, 400);
 
   delete user.totpSecret;
-  await putStoredData(c, userKey, JSON.stringify(user));
+  await c.env.CLOUDSYNC_KV.put(userKey, JSON.stringify(user));
 
   return c.json({ ok: true, message: "Two-factor authentication disabled." });
 });
@@ -762,7 +713,7 @@ app.post("/api/user/change-password", async (c) => {
 
   const secret = c.env.JWT_SECRET || "cloudsync-secret-change-me";
   const userKey = `user:${username.toLowerCase()}`;
-  const raw = await getStoredData(c, userKey);
+  const raw = await c.env.CLOUDSYNC_KV.get(userKey);
   if (!raw) return c.json({ error: "User not found." }, 404);
 
   const user = JSON.parse(raw);
@@ -772,7 +723,7 @@ app.post("/api/user/change-password", async (c) => {
   }
 
   user.verifier = await hashVerifier(newVerifier, secret);
-  await putStoredData(c, userKey, JSON.stringify(user));
+  await c.env.CLOUDSYNC_KV.put(userKey, JSON.stringify(user));
 
   return c.json({ ok: true, message: "Password updated successfully." });
 });
@@ -1312,7 +1263,7 @@ app.get("/api/sync/shares", async (c) => {
   const vault = c.req.query("vault") || "default";
   if (!isValidVaultName(vault)) return c.json({ error: "Invalid vault." }, 400);
 
-  const raw = await getStoredData(c, `vault_shares:${userId}:${vault}`);
+  const raw = await c.env.CLOUDSYNC_KV.get(`vault_shares:${userId}:${vault}`);
   const shares: string[] = raw ? JSON.parse(raw) : [];
   return c.json({ ok: true, vault, shares });
 });
@@ -1338,16 +1289,16 @@ app.post("/api/sync/shares", async (c) => {
     return c.json({ error: "You cannot invite yourself." }, 400);
   }
 
-  const inviteUser = await getStoredData(c, `user:${inviteUsername.toLowerCase()}`);
+  const inviteUser = await c.env.CLOUDSYNC_KV.get(`user:${inviteUsername.toLowerCase()}`);
   if (!inviteUser) return c.json({ error: `User "${inviteUsername}" does not exist.` }, 404);
 
   const sharesKey = `vault_shares:${userId}:${vault}`;
-  const raw = await getStoredData(c, sharesKey);
+  const raw = await c.env.CLOUDSYNC_KV.get(sharesKey);
   const shares: string[] = raw ? JSON.parse(raw) : [];
 
   if (!shares.some((u) => u.toLowerCase() === inviteUsername.toLowerCase())) {
     shares.push(inviteUsername);
-    await putStoredData(c, sharesKey, JSON.stringify(shares));
+    await c.env.CLOUDSYNC_KV.put(sharesKey, JSON.stringify(shares));
   }
 
   return c.json({ ok: true, message: `Vault shared with ${inviteUsername}`, shares });
@@ -1360,10 +1311,10 @@ app.delete("/api/sync/shares", async (c) => {
   if (!isValidVaultName(vault) || !username) return c.json({ error: "Invalid parameters." }, 400);
 
   const sharesKey = `vault_shares:${userId}:${vault}`;
-  const raw = await getStoredData(c, sharesKey);
+  const raw = await c.env.CLOUDSYNC_KV.get(sharesKey);
   let shares: string[] = raw ? JSON.parse(raw) : [];
   shares = shares.filter((u) => u.toLowerCase() !== username.toLowerCase());
-  await putStoredData(c, sharesKey, JSON.stringify(shares));
+  await c.env.CLOUDSYNC_KV.put(sharesKey, JSON.stringify(shares));
 
   return c.json({ ok: true, shares });
 });
@@ -1375,7 +1326,7 @@ app.get("/api/sync/devices", async (c) => {
   if (!isValidVaultName(vault)) return c.json({ error: "Invalid vault." }, 400);
 
   try {
-    const raw = await getStoredData(c, `vault_devices:${userId}:${vault}`);
+    const raw = await c.env.CLOUDSYNC_KV.get(`vault_devices:${userId}:${vault}`);
     const devices: DeviceInfo[] = raw ? JSON.parse(raw) : [];
     return c.json({ devices });
   } catch (err: any) {
@@ -1401,7 +1352,7 @@ app.put("/api/sync/devices", async (c) => {
 
   const devicesKey = `vault_devices:${userId}:${vault}`;
   try {
-    const raw = await getStoredData(c, devicesKey);
+    const raw = await c.env.CLOUDSYNC_KV.get(devicesKey);
     let devices: DeviceInfo[] = raw ? JSON.parse(raw) : [];
     const idx = devices.findIndex((d) => d.deviceId === body.deviceId);
     const updated: DeviceInfo = {
@@ -1416,7 +1367,7 @@ app.put("/api/sync/devices", async (c) => {
     if (idx >= 0) devices[idx] = updated;
     else devices.push(updated);
 
-    await putStoredData(c, devicesKey, JSON.stringify(devices));
+    await c.env.CLOUDSYNC_KV.put(devicesKey, JSON.stringify(devices));
     return c.json({ ok: true, device: updated });
   } catch (err: any) {
     return c.json({ error: err?.message }, 500);
@@ -1434,10 +1385,10 @@ app.delete("/api/sync/devices/:deviceId", async (c) => {
 
   const devicesKey = `vault_devices:${userId}:${vault}`;
   try {
-    const raw = await getStoredData(c, devicesKey);
+    const raw = await c.env.CLOUDSYNC_KV.get(devicesKey);
     let devices: DeviceInfo[] = raw ? JSON.parse(raw) : [];
     devices = devices.filter((d) => d.deviceId !== deviceId);
-    await putStoredData(c, devicesKey, JSON.stringify(devices));
+    await c.env.CLOUDSYNC_KV.put(devicesKey, JSON.stringify(devices));
     return c.json({ ok: true });
   } catch (err: any) {
     return c.json({ error: err?.message }, 500);
