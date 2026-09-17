@@ -1,4 +1,9 @@
-import type { Entity, RemotelySavePluginSettings } from "./baseTypes";
+import {
+  DEFAULT_DEBUG_FOLDER,
+  DEFAULT_DEVICE_CONFIGS_FOLDER,
+  type Entity,
+  type RemotelySavePluginSettings,
+} from "./baseTypes";
 import { copyFile, copyFileOrFolder } from "./copyLogic";
 import type { FakeFs } from "./fsAll";
 import type { FakeFsEncrypt } from "./fsEncrypt";
@@ -24,9 +29,18 @@ export async function fastPushPath(
   db: InternalDBs,
   vaultRandomID: string,
   profileID: string,
-  settings: RemotelySavePluginSettings
+  settings: RemotelySavePluginSettings,
+  cursor?: { line: number; ch: number }
 ): Promise<boolean> {
-  // Check if file exists locally
+  const isNotesOnly = (settings.settingsSyncMode ?? "notes_only") !== "shared";
+  if (
+    path.startsWith(DEFAULT_DEBUG_FOLDER) ||
+    path.startsWith(DEFAULT_DEVICE_CONFIGS_FOLDER) ||
+    (isNotesOnly && (path.startsWith(".obsidian/") || path === ".obsidian"))
+  ) {
+    return false;
+  }
+
   let localStat: Entity | null = null;
   try {
     localStat = await fsLocal.stat(path);
@@ -35,18 +49,30 @@ export async function fastPushPath(
   }
 
   if (localStat !== null) {
-    // Local exists -> upload
     if (
       settings.skipSizeLargerThan &&
       settings.skipSizeLargerThan > 0 &&
       localStat.size &&
       localStat.size > settings.skipSizeLargerThan * 1024 * 1024
     ) {
-      console.warn(`CloudSync: Skipping large file ${path} (${localStat.size} bytes)`);
       return false;
     }
 
-    const { entity } = await copyFileOrFolder(path, fsLocal, fsEncrypt);
+    let entity: Entity;
+    if (path.endsWith("/")) {
+      const res = await copyFileOrFolder(path, fsLocal, fsEncrypt);
+      entity = res.entity;
+    } else {
+      const content = await fsLocal.readFile(path);
+      entity = await fsEncrypt.writeFile(
+        path,
+        content,
+        localStat.mtimeCli!,
+        localStat.ctimeCli ?? localStat.mtimeCli!,
+        cursor
+      );
+    }
+
     fullfillMTimeOfRemoteEntityInplace(entity, localStat.mtimeCli!);
     await upsertPrevSyncRecordByVaultAndProfile(
       db,
@@ -56,13 +82,9 @@ export async function fastPushPath(
     );
     return true;
   } else {
-    // Local does not exist -> deleted locally -> remove remote
     try {
       await fsEncrypt.rm(path);
-    } catch (err: any) {
-      // Ignore not found on remote
-      console.debug(`CloudSync rm on remote for ${path}:`, err);
-    }
+    } catch {}
     await clearPrevSyncRecordByVaultAndProfile(
       db,
       vaultRandomID,
@@ -79,13 +101,40 @@ export async function fastPullChange(
   fsEncrypt: FakeFsEncrypt,
   db: InternalDBs,
   vaultRandomID: string,
-  profileID: string
-): Promise<{ action: "pulled" | "deleted" | "skipped"; path: string }> {
-  // Decrypt remote key
+  profileID: string,
+  settings?: RemotelySavePluginSettings,
+  configDir?: string
+): Promise<{
+  action: "pulled" | "deleted" | "cursor" | "skipped";
+  path: string;
+  cursor?: { line: number; ch: number };
+}> {
   const plainKey = await fsEncrypt.decryptRemoteKey(change.key);
 
+  if (
+    plainKey.startsWith(DEFAULT_DEBUG_FOLDER) ||
+    plainKey.startsWith(DEFAULT_DEVICE_CONFIGS_FOLDER)
+  ) {
+    return { action: "skipped", path: plainKey, cursor: change.cursor };
+  }
+
+  const isNotesOnly = (settings?.settingsSyncMode ?? "notes_only") !== "shared";
+  const cfgDir = configDir || ".obsidian";
+  if (
+    isNotesOnly &&
+    (plainKey.startsWith(".obsidian/") ||
+      plainKey.startsWith(`${cfgDir}/`) ||
+      plainKey === ".obsidian" ||
+      plainKey === cfgDir)
+  ) {
+    return { action: "skipped", path: plainKey, cursor: change.cursor };
+  }
+
+  if (change.action === "cursor") {
+    return { action: "cursor", path: plainKey, cursor: change.cursor };
+  }
+
   if (change.action === "put") {
-    // Check if local exists
     let localStat: Entity | null = null;
     try {
       localStat = await fsLocal.stat(plainKey);
@@ -94,20 +143,14 @@ export async function fastPullChange(
     }
 
     if (localStat !== null && localStat.mtimeCli !== undefined) {
-      // If local mtime matches change.mtime within tolerance, we already have it
       if (isMTimeEqual(localStat.mtimeCli, change.mtime, 1500)) {
-        return { action: "skipped", path: plainKey };
+        return { action: "skipped", path: plainKey, cursor: change.cursor };
       }
-      // If local file is strictly newer than change.mtime by more than tolerance, avoid overwriting
       if (localStat.mtimeCli > change.mtime + 1500) {
-        console.warn(
-          `CloudSync: Local file ${plainKey} is newer than remote change (${localStat.mtimeCli} > ${change.mtime}), skipping fast pull.`
-        );
-        return { action: "skipped", path: plainKey };
+        return { action: "skipped", path: plainKey, cursor: change.cursor };
       }
     }
 
-    // Pull file from remote to local
     let entity: Entity;
     if (plainKey.endsWith("/")) {
       entity = await fsLocal.mkdir(plainKey);
@@ -122,7 +165,7 @@ export async function fastPullChange(
       profileID,
       entity
     );
-    return { action: "pulled", path: plainKey };
+    return { action: "pulled", path: plainKey, cursor: change.cursor };
   } else if (change.action === "delete") {
     let localExists = false;
     try {

@@ -329,16 +329,6 @@ export default class CloudSyncPlugin extends Plugin {
         });
     });
 
-    menu.addItem((item) => {
-      item
-        .setTitle("Dry run (Preview changes)")
-        .setIcon("lucide-eye")
-        .setDisabled(!hasVault)
-        .onClick(async () => {
-          await this.syncRun("dry");
-        });
-    });
-
     const activeFile = this.app.workspace.getActiveFile();
     menu.addItem((item) => {
       item
@@ -758,24 +748,6 @@ export default class CloudSyncPlugin extends Plugin {
       },
     });
 
-    this.addCommand({
-      id: "cloudsync-deleted-files",
-      name: "Open Cloud Trash (Restore Deleted Files)",
-      icon: "lucide-trash-2",
-      callback: () => {
-        new DeletedFilesModal(this.app, this, false).open();
-      },
-    });
-
-    this.addCommand({
-      id: "cloudsync-sync-log",
-      name: "Open Sync Activity Log",
-      icon: "lucide-align-left",
-      callback: () => {
-        new SyncLogModal(this.app, this).open();
-      },
-    });
-
     this.addSettingTab(new CloudSyncSettingTab(this.app, this));
 
     this.enableCheckingFileStat();
@@ -847,10 +819,7 @@ export default class CloudSyncPlugin extends Plugin {
     }
 
     const idleMs = Date.now() - this.lastUserActivityTime;
-    const isMobile = Platform.isMobileApp;
-    const delay = isMobile
-      ? (idleMs > 30_000 ? 10000 : 5000)
-      : (idleMs > 30_000 ? 5000 : 2000);
+    const delay = idleMs > 30_000 ? 5000 : 2000;
 
     this.livePulseTimeoutID = window.setTimeout(async () => {
       await this.runLivePulse();
@@ -1130,10 +1099,9 @@ export default class CloudSyncPlugin extends Plugin {
     if (this.debouncePushTimer) {
       window.clearTimeout(this.debouncePushTimer);
     }
-    const debounceMs = Platform.isMobileApp ? 1500 : 800;
     this.debouncePushTimer = window.setTimeout(async () => {
       await this.triggerDebouncedPush();
-    }, debounceMs);
+    }, 800);
   }
 
   async triggerDebouncedPush() {
