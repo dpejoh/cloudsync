@@ -120,18 +120,27 @@ export const prepareDBs = async (
   };
 };
 
-export const destroyDBs = async () => {
-  const req = indexedDB.deleteDatabase(DEFAULT_DB_NAME);
-  req.onsuccess = (event) => {
-    console.info("db deleted");
-  };
-  req.onblocked = (event) => {
-    console.warn("trying to delete db but it was blocked");
-  };
-  req.onerror = (event) => {
-    console.error("tried to delete db but something goes wrong!");
-    console.error(event);
-  };
+export const destroyDBs = async (): Promise<void> => {
+  return new Promise((resolve) => {
+    try {
+      const req = indexedDB.deleteDatabase(DEFAULT_DB_NAME);
+      req.onsuccess = () => {
+        console.info("db deleted");
+        resolve();
+      };
+      req.onblocked = () => {
+        console.warn("trying to delete db but it was blocked");
+        resolve();
+      };
+      req.onerror = (event) => {
+        console.error("tried to delete db but something goes wrong!", event);
+        resolve();
+      };
+    } catch (err) {
+      console.warn("deleteDatabase error:", err);
+      resolve();
+    }
+  });
 };
 
 export const insertSyncPlanRecordByVault = async (
