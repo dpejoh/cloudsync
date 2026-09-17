@@ -27,7 +27,7 @@ if (!JWT_SECRET) {
       fs.mkdirSync(DATA_DIR, { recursive: true });
     }
     fs.writeFileSync(secretFilePath, JWT_SECRET, "utf8");
-    console.log("🔑 Generated new persistent JWT secret in data directory.");
+    console.log("generated persistent jwt secret in data directory");
   }
 }
 
@@ -35,9 +35,9 @@ if (!JWT_SECRET) {
 const dbPath = path.join(DATA_DIR, "cloudsync.db");
 const storageDir = path.join(DATA_DIR, "storage");
 
-console.log(`📁 Data directory: ${DATA_DIR}`);
-console.log(`💾 SQLite Database: ${dbPath}`);
-console.log(`📦 Storage Directory: ${storageDir}`);
+console.log(`data dir: ${DATA_DIR}`);
+console.log(`sqlite db: ${dbPath}`);
+console.log(`storage dir: ${storageDir}`);
 
 const db = initDatabase(dbPath);
 const localKv = new LocalSqliteKV(db);
@@ -59,16 +59,7 @@ const server = serve(
     hostname: HOST,
   },
   (info) => {
-    console.log(`
-╔═══════════════════════════════════════════════════════════╗
-║         🚀 CloudSync Self-Hosted Private VPS Server       ║
-║═══════════════════════════════════════════════════════════║
-║  Listening on : http://${info.address}:${info.port}                   ║
-║  Mode         : ${WORKER_MODE.toUpperCase().padEnd(41)} ║
-║  Version      : 2.1.0                                     ║
-║  Status       : Ready for Obsidian Sync connections       ║
-╚═══════════════════════════════════════════════════════════╝
-    `);
+    console.log(`cloudsync server running on http://${info.address}:${info.port} (mode: ${WORKER_MODE})`);
   }
 );
 
