@@ -47,7 +47,7 @@ app.use("*", async (c, next) => {
 
 app.onError((err, c) => {
   console.error("Worker unhandled error:", err);
-  return c.json({ error: err.message || "Internal server error", stack: err.stack }, 500);
+  return c.json({ error: err.message || "Internal server error" }, 500);
 });
 
 app.use(
@@ -76,6 +76,10 @@ app.use(
 );
 
 // Helpers
+function getJwtSecret(c: any): string {
+  return c.env.JWT_SECRET || "cloudsync-secret-change-me";
+}
+
 function base64UrlEncode(str: string): string {
   return btoa(str).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
@@ -425,7 +429,7 @@ app.post("/api/auth/single-login", async (c) => {
     return c.json({ error: "Valid 64-character password verifier required." }, 400);
   }
 
-  const secret = c.env.JWT_SECRET || "cloudsync-secret-change-me";
+  const secret = getJwtSecret(c);
   const hashed = await hashVerifier(verifier, secret);
 
   let stored = await getStoredData(c, "single:verifier");
@@ -475,7 +479,7 @@ app.post("/api/auth/register", async (c) => {
     return c.json({ error: "Invalid username or verifier format." }, 400);
   }
 
-  const secret = c.env.JWT_SECRET || "cloudsync-secret-change-me";
+  const secret = getJwtSecret(c);
   const userKey = `user:${username.toLowerCase()}`;
 
   const existing = await getStoredData(c, userKey);
@@ -523,7 +527,7 @@ app.post("/api/auth/login", async (c) => {
     return c.json({ error: "Username and password verifier are required." }, 400);
   }
 
-  const secret = c.env.JWT_SECRET || "cloudsync-secret-change-me";
+  const secret = getJwtSecret(c);
   const userKey = `user:${username.toLowerCase()}`;
   let user: any = null;
 
@@ -577,7 +581,7 @@ app.post("/api/auth/recover", async (c) => {
     return c.json({ error: "Username, recovery code, and new password are required." }, 400);
   }
 
-  const secret = c.env.JWT_SECRET || "cloudsync-secret-change-me";
+  const secret = getJwtSecret(c);
   const userKey = `user:${username.toLowerCase()}`;
   let user: any = null;
 
@@ -613,7 +617,7 @@ app.get("/api/auth/verify-token", async (c) => {
   const match = auth.match(/^Bearer\s+(.+)$/i);
   if (!match) return c.json({ valid: false }, 401);
 
-  const secret = c.env.JWT_SECRET || "cloudsync-secret-change-me";
+  const secret = getJwtSecret(c);
   const payload = await verifyJwt(match[1], secret);
   if (!payload) return c.json({ valid: false }, 401);
 
@@ -633,7 +637,7 @@ app.use("/api/*", async (c, next) => {
     return c.json({ error: "Unauthorized: Missing Bearer token." }, 401);
   }
 
-  const secret = c.env.JWT_SECRET || "cloudsync-secret-change-me";
+  const secret = getJwtSecret(c);
   const payload = await verifyJwt(match[1], secret);
   if (!payload || !payload.sub) {
     return c.json({ error: "Unauthorized: Invalid or expired token." }, 401);
@@ -760,7 +764,7 @@ app.post("/api/user/change-password", async (c) => {
     return c.json({ error: "Valid 64-character verifiers required." }, 400);
   }
 
-  const secret = c.env.JWT_SECRET || "cloudsync-secret-change-me";
+  const secret = getJwtSecret(c);
   const userKey = `user:${username.toLowerCase()}`;
   const raw = await getStoredData(c, userKey);
   if (!raw) return c.json({ error: "User not found." }, 404);
