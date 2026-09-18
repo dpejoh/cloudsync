@@ -29,7 +29,16 @@ import { ExcludedFoldersModal } from "./excludedFoldersModal";
 import { DeletedFilesModal } from "./deletedFilesModal";
 import { SyncLogModal } from "./syncLogModal";
 import { destroyDBs } from "./localdb";
+import { createOtpInput } from "./otpInput";
 import type CloudSyncPlugin from "./main";
+
+function getResponseError(res: any, fallback: string): string {
+  try {
+    return res?.json?.error || res?.text || fallback;
+  } catch {
+    return res?.text || fallback;
+  }
+}
 
 export class CloudSyncSettingTab extends PluginSettingTab {
   plugin: CloudSyncPlugin;
@@ -207,6 +216,11 @@ export class CloudSyncSettingTab extends PluginSettingTab {
       attr: { src: OBSIDIAN_LOGO_PNG, alt: "Obsidian" },
     });
 
+    if (this.requires2FA) {
+      this.render2FAPrompt(authBox);
+      return;
+    }
+
     if (isSingleMode) {
       authBox.createDiv({
         cls: "cloudsync-auth-title",
@@ -301,17 +315,15 @@ export class CloudSyncSettingTab extends PluginSettingTab {
           text: "2FA Verification Code",
           cls: "cloudsync-input-label",
         });
-        const totpInputEl = totpGroup.createEl("input", {
-          type: "text",
-          cls: "cloudsync-text-input",
-          value: this.totpCodeInput,
-          placeholder: "6-digit code",
+        createOtpInput(totpGroup, {
+          length: 6,
+          initialValue: this.totpCodeInput,
+          autoFocus: false,
+          onChange: (code) => {
+            this.totpCodeInput = code;
+            this.errorMessage = null;
+          },
         });
-        totpInputEl.maxLength = 6;
-        totpInputEl.oninput = (e) => {
-          this.totpCodeInput = (e.target as HTMLInputElement).value.trim();
-          this.errorMessage = null;
-        };
       } else {
         const recGroup = form.createDiv({ cls: "cloudsync-input-group" });
         recGroup.createEl("label", {
@@ -426,27 +438,6 @@ export class CloudSyncSettingTab extends PluginSettingTab {
         if (e.key === "Enter") this.handleMultiAuthSubmit();
       };
 
-      if (this.requires2FA) {
-        const totpGroup = form.createDiv({ cls: "cloudsync-input-group" });
-        totpGroup.createEl("label", {
-          text: "2FA Verification Code",
-          cls: "cloudsync-input-label",
-        });
-        const totpInputEl = totpGroup.createEl("input", {
-          type: "text",
-          cls: "cloudsync-text-input",
-          value: this.totpCodeInput,
-          placeholder: "6-digit code",
-        });
-        totpInputEl.oninput = (e) => {
-          this.totpCodeInput = (e.target as HTMLInputElement).value.trim();
-          this.errorMessage = null;
-        };
-        totpInputEl.onkeydown = (e) => {
-          if (e.key === "Enter") this.handleMultiAuthSubmit();
-        };
-      }
-
       const submitBtn = form.createEl("button", {
         cls: "mod-cta cloudsync-primary-btn",
         text: this.isLoading
@@ -494,6 +485,57 @@ export class CloudSyncSettingTab extends PluginSettingTab {
       this.plugin.settings.cloudsync.serverUrl = "";
       await this.plugin.saveSettings();
       this.serverUrlInput = "";
+      this.errorMessage = null;
+      this.display();
+    };
+  }
+
+  private render2FAPrompt(authBox: HTMLElement) {
+    authBox.createDiv({
+      cls: "cloudsync-auth-title",
+      text: "Two-factor authentication",
+    });
+    authBox.createDiv({
+      cls: "cloudsync-auth-subtitle",
+      text: `Enter the 6-digit code from your authenticator app for "${this.usernameInput}".`,
+    });
+
+    if (this.errorMessage) {
+      const errorEl = authBox.createDiv({ cls: "cloudsync-error-banner" });
+      errorEl.createSpan({ text: this.errorMessage });
+    }
+
+    const form = authBox.createDiv({ cls: "cloudsync-auth-form" });
+
+    createOtpInput(form, {
+      length: 6,
+      initialValue: this.totpCodeInput,
+      autoFocus: true,
+      onChange: (code) => {
+        this.totpCodeInput = code;
+        this.errorMessage = null;
+      },
+      onComplete: (code) => {
+        this.totpCodeInput = code;
+        this.handleMultiAuthSubmit();
+      },
+    });
+
+    const verifyBtn = form.createEl("button", {
+      cls: "mod-cta cloudsync-primary-btn cloudsync-otp-action-btn",
+      text: this.isLoading ? "Verifying..." : "Verify & Sign in",
+    });
+    verifyBtn.disabled = this.isLoading;
+    verifyBtn.onclick = () => this.handleMultiAuthSubmit();
+
+    const backRow = authBox.createDiv({ cls: "cloudsync-switch-row" });
+    const backLink = backRow.createEl("a", {
+      cls: "cloudsync-inline-link",
+      text: "← Back to Sign in",
+    });
+    backLink.onclick = () => {
+      this.requires2FA = false;
+      this.totpCodeInput = "";
       this.errorMessage = null;
       this.display();
     };
@@ -584,14 +626,14 @@ export class CloudSyncSettingTab extends PluginSettingTab {
         });
 
         if (res.status !== 200 && res.status !== 201) {
-          this.errorMessage = res.json?.error || "Registration failed.";
+          this.errorMessage = getResponseError(res, "Registration failed.");
           this.isLoading = false;
           this.display();
           return;
         }
 
-        cs.token = res.json.token;
-        cs.userId = res.json.user?.id || "";
+        cs.token = res.json?.token;
+        cs.userId = res.json?.user?.id || "";
         cs.username = this.usernameInput;
         cs.vaultId = this.app.vault.getName();
         cs.encryptionKey = encryptionKey;
@@ -621,16 +663,16 @@ export class CloudSyncSettingTab extends PluginSettingTab {
           throw: false,
         });
 
-        if (res.status === 200 && res.json?.requires2FA) {
+        if (res.json?.requires2FA) {
           this.requires2FA = true;
           this.isLoading = false;
+          this.errorMessage = null;
           this.display();
           return;
         }
 
         if (res.status !== 200) {
-          this.errorMessage =
-            res.json?.error || "Invalid username or password.";
+          this.errorMessage = getResponseError(res, "Invalid username or password.");
           this.isLoading = false;
           this.display();
           return;
@@ -708,14 +750,16 @@ export class CloudSyncSettingTab extends PluginSettingTab {
       });
 
       if (res.status !== 200) {
-        this.errorMessage =
-          res.json?.error || "Password reset failed. Please check your verification code.";
+        this.errorMessage = getResponseError(
+          res,
+          "Password reset failed. Please check your verification code."
+        );
         this.isLoading = false;
         this.display();
         return;
       }
 
-      cs.token = res.json.token;
+      cs.token = res.json?.token;
       cs.userId = res.json.user?.id || "";
       cs.username = this.usernameInput;
       cs.vaultId = this.app.vault.getName();

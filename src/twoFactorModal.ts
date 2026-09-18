@@ -1,6 +1,7 @@
 import { App, Modal, Notice, requestUrl } from "obsidian";
 import QRCode from "qrcode";
 import { generateTotpSecret } from "./authHelper";
+import { createOtpInput } from "./otpInput";
 import type CloudSyncPlugin from "./main";
 
 export class TwoFactorModal extends Modal {
@@ -69,9 +70,6 @@ export class TwoFactorModal extends Modal {
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // Step 1: Interstitial Prompt ("Protect your account")
-  // ---------------------------------------------------------------------------
   private renderPromptStep(contentEl: HTMLElement) {
     contentEl.createEl("h2", {
       text: "Protect your account",
@@ -107,9 +105,6 @@ export class TwoFactorModal extends Modal {
     };
   }
 
-  // ---------------------------------------------------------------------------
-  // Step 2: Dual Setup Methods (QR Code & Redacted Manual Key)
-  // ---------------------------------------------------------------------------
   private renderSetupStep(contentEl: HTMLElement) {
     contentEl.createEl("h2", {
       text: "Set up Authenticator (2FA)",
@@ -196,9 +191,6 @@ export class TwoFactorModal extends Modal {
     };
   }
 
-  // ---------------------------------------------------------------------------
-  // Step 3: OTP Verification Challenge
-  // ---------------------------------------------------------------------------
   private renderVerifyStep(contentEl: HTMLElement) {
     contentEl.createEl("h2", {
       text: "Verify Authenticator Code",
@@ -217,45 +209,33 @@ export class TwoFactorModal extends Modal {
 
     const form = contentEl.createDiv({ cls: "cloudsync-auth-form" });
 
-    const inputGroup = form.createDiv({ cls: "cloudsync-input-group" });
-    const otpInputEl = inputGroup.createEl("input", {
-      type: "text",
-      cls: "cloudsync-text-input cloudsync-otp-input",
-      value: this.otpInput,
-      placeholder: "000000",
-      attr: { maxlength: "6", autofocus: "true" },
+    createOtpInput(form, {
+      length: 6,
+      initialValue: this.otpInput,
+      autoFocus: true,
+      onChange: (code) => {
+        this.otpInput = code;
+        this.errorMessage = null;
+      },
+      onComplete: (code) => {
+        this.otpInput = code;
+        this.handleVerify();
+      },
     });
 
-    otpInputEl.oninput = (e) => {
-      this.otpInput = (e.target as HTMLInputElement).value
-        .replace(/[^0-9]/g, "")
-        .slice(0, 6);
-      this.errorMessage = null;
-    };
-
-    otpInputEl.onkeydown = (e) => {
-      if (e.key === "Enter") {
-        this.handleVerify();
-      }
-    };
-
-    // Focus input
-    setTimeout(() => otpInputEl.focus(), 100);
-
-    const buttonRow = contentEl.createDiv({ cls: "cloudsync-modal-btn-row" });
-
-    const verifyBtn = buttonRow.createEl("button", {
-      cls: "mod-cta",
+    const verifyBtn = form.createEl("button", {
+      cls: "mod-cta cloudsync-primary-btn cloudsync-otp-action-btn",
       text: this.isLoading ? "Verifying..." : "Verify & Enable 2FA",
     });
     verifyBtn.disabled = this.isLoading;
     verifyBtn.onclick = () => this.handleVerify();
 
-    const backBtn = buttonRow.createEl("button", {
+    const backRow = contentEl.createDiv({ cls: "cloudsync-switch-row" });
+    const backLink = backRow.createEl("a", {
+      cls: "cloudsync-inline-link",
       text: "← Back",
     });
-    backBtn.disabled = this.isLoading;
-    backBtn.onclick = () => {
+    backLink.onclick = () => {
       this.step = "setup";
       this.errorMessage = null;
       this.render();
