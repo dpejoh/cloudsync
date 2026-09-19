@@ -6,7 +6,7 @@ import type CloudSyncPlugin from "./main";
 
 export class TwoFactorModal extends Modal {
   plugin: CloudSyncPlugin;
-  private step: "prompt" | "setup" | "verify";
+  private step: "intro" | "setup" | "verify";
   private totpSecret: string;
   private isSecretVisible = false;
   private otpInput = "";
@@ -18,7 +18,7 @@ export class TwoFactorModal extends Modal {
   constructor(
     app: App,
     plugin: CloudSyncPlugin,
-    initialStep: "prompt" | "setup" = "prompt",
+    initialStep: "intro" | "setup" = "intro",
     onFinished?: (success: boolean) => void
   ) {
     super(app);
@@ -59,10 +59,10 @@ export class TwoFactorModal extends Modal {
   private render() {
     const { contentEl } = this;
     contentEl.empty();
-    contentEl.addClass("cloudsync-2fa-modal");
+    contentEl.addClass("two-factor-modal");
 
-    if (this.step === "prompt") {
-      this.renderPromptStep(contentEl);
+    if (this.step === "intro") {
+      this.renderIntroStep(contentEl);
     } else if (this.step === "setup") {
       this.renderSetupStep(contentEl);
     } else if (this.step === "verify") {
@@ -70,22 +70,22 @@ export class TwoFactorModal extends Modal {
     }
   }
 
-  private renderPromptStep(contentEl: HTMLElement) {
+  private renderIntroStep(contentEl: HTMLElement) {
     contentEl.createEl("h2", {
       text: "Protect your account",
-      cls: "cloudsync-modal-title",
+      cls: "sub-modal-title",
     });
 
-    const descEl = contentEl.createDiv({ cls: "cloudsync-modal-desc" });
+    const descEl = contentEl.createDiv({ cls: "modal-description" });
     descEl.createEl("p", {
       text: "To ensure you do not lose access to your account and to protect your encrypted notes, you will need to set up Two-Factor Authentication (2FA) now.",
     });
     descEl.createEl("p", {
-      text: "This pairs CloudSync with an authenticator app (such as Google Authenticator, Aegis, 1Password, or Ente Auth) so only you can access your vault.",
-      cls: "cloudsync-hint",
+      text: "Pair an authenticator app (such as Google Authenticator, Aegis, 1Password, or Ente Auth) to secure access to your account.",
+      cls: "input-hint",
     });
 
-    const buttonRow = contentEl.createDiv({ cls: "cloudsync-modal-btn-row" });
+    const buttonRow = contentEl.createDiv({ cls: "modal-btn-row" });
 
     const setupBtn = buttonRow.createEl("button", {
       cls: "mod-cta",
@@ -108,44 +108,42 @@ export class TwoFactorModal extends Modal {
   private renderSetupStep(contentEl: HTMLElement) {
     contentEl.createEl("h2", {
       text: "Set up Authenticator (2FA)",
-      cls: "cloudsync-modal-title",
+      cls: "sub-modal-title",
     });
 
     contentEl.createEl("p", {
       text: "Scan this QR code with your authenticator app on your phone or computer.",
-      cls: "cloudsync-modal-desc",
+      cls: "modal-description",
     });
 
-    // 1. QR Code Display
-    if (this.qrDataUrl) {
-      const qrWrapper = contentEl.createDiv({ cls: "cloudsync-qr-wrapper" });
+        if (this.qrDataUrl) {
+      const qrWrapper = contentEl.createDiv({ cls: "qr-wrapper" });
       qrWrapper.createEl("img", {
         attr: { src: this.qrDataUrl, alt: "CloudSync 2FA QR Code" },
-        cls: "cloudsync-qr-img",
+        cls: "qr-img",
       });
     }
 
-    // 2. Manual Key Section (Redacted by default)
-    const manualSection = contentEl.createDiv({
-      cls: "cloudsync-manual-key-section",
+        const manualSection = contentEl.createDiv({
+      cls: "manual-key-section",
     });
     manualSection.createEl("div", {
       text: "Or enter this secret key manually:",
-      cls: "cloudsync-manual-label",
+      cls: "manual-key-label",
     });
 
-    const keyBox = manualSection.createDiv({ cls: "cloudsync-key-box" });
+    const keyBox = manualSection.createDiv({ cls: "key-box" });
     const formattedSecret =
       this.totpSecret.match(/.{1,4}/g)?.join(" ") || this.totpSecret;
 
     const secretDisplay = keyBox.createSpan({
-      cls: "cloudsync-secret-text",
+      cls: "secret-text",
       text: this.isSecretVisible
         ? formattedSecret
         : "•••• •••• •••• •••• ••••",
     });
 
-    const actionsDiv = keyBox.createDiv({ cls: "cloudsync-key-actions" });
+    const actionsDiv = keyBox.createDiv({ cls: "key-actions" });
 
     const toggleBtn = actionsDiv.createEl("button", {
       cls: "mod-sm",
@@ -169,12 +167,11 @@ export class TwoFactorModal extends Modal {
       setTimeout(() => copyBtn.setText("Copy"), 2000);
     };
 
-    // Actions Row
-    const buttonRow = contentEl.createDiv({ cls: "cloudsync-modal-btn-row" });
+        const buttonRow = contentEl.createDiv({ cls: "modal-btn-row" });
 
     const continueBtn = buttonRow.createEl("button", {
       cls: "mod-cta",
-      text: "Continue to Verification →",
+      text: "Continue",
     });
     continueBtn.onclick = () => {
       this.step = "verify";
@@ -194,20 +191,20 @@ export class TwoFactorModal extends Modal {
   private renderVerifyStep(contentEl: HTMLElement) {
     contentEl.createEl("h2", {
       text: "Verify Authenticator Code",
-      cls: "cloudsync-modal-title",
+      cls: "sub-modal-title",
     });
 
     contentEl.createEl("p", {
       text: "Enter the 6-digit code currently generated by your authenticator app to complete setup.",
-      cls: "cloudsync-modal-desc",
+      cls: "modal-description",
     });
 
     if (this.errorMessage) {
-      const errorEl = contentEl.createDiv({ cls: "cloudsync-error-banner" });
+      const errorEl = contentEl.createDiv({ cls: "error-banner" });
       errorEl.createSpan({ text: this.errorMessage });
     }
 
-    const form = contentEl.createDiv({ cls: "cloudsync-auth-form" });
+    const form = contentEl.createDiv({ cls: "auth-form" });
 
     createOtpInput(form, {
       length: 6,
@@ -224,15 +221,15 @@ export class TwoFactorModal extends Modal {
     });
 
     const verifyBtn = form.createEl("button", {
-      cls: "mod-cta cloudsync-primary-btn cloudsync-otp-action-btn",
+      cls: "mod-cta auth-submit-btn otp-action-btn",
       text: this.isLoading ? "Verifying..." : "Verify & Enable 2FA",
     });
     verifyBtn.disabled = this.isLoading;
     verifyBtn.onclick = () => this.handleVerify();
 
-    const backRow = contentEl.createDiv({ cls: "cloudsync-switch-row" });
+    const backRow = contentEl.createDiv({ cls: "switch-row" });
     const backLink = backRow.createEl("a", {
-      cls: "cloudsync-inline-link",
+      cls: "inline-link",
       text: "← Back",
     });
     backLink.onclick = () => {
@@ -278,10 +275,9 @@ export class TwoFactorModal extends Modal {
         return;
       }
 
-      // Success!
-      cs.has2FA = true;
+            cs.has2FA = true;
       await this.plugin.saveSettings();
-      new Notice("CloudSync: Two-factor authentication enabled successfully!");
+      new Notice("Two-factor authentication enabled.");
       this.onFinished?.(true);
       this.close();
     } catch (err: any) {

@@ -88,7 +88,7 @@ export interface RemotelySavePluginSettings {
   deviceName?: string;
   lastSettingsBackupTime?: number;
 
-  // Official Obsidian Sync Replica Options
+  // File type and configuration sync options
   isSyncPaused?: boolean;
   syncImages?: boolean;
   syncAudio?: boolean;

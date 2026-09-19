@@ -24,7 +24,7 @@ export class VaultPickerModal extends Modal {
   }
 
   async onOpen() {
-    this.contentEl.addClass("cloudsync-vault-picker-container");
+    this.contentEl.addClass("vault-picker-modal");
     const localName = this.app.vault.getName().trim();
     if (this.isValidName(localName)) {
       this.newVaultName = localName;
@@ -109,13 +109,13 @@ export class VaultPickerModal extends Modal {
     contentEl.createEl("h3", { text: "Available remote vaults" });
 
     if (this.isLoading) {
-      const loadingEl = contentEl.createDiv({ cls: "cloudsync-loading" });
+      const loadingEl = contentEl.createDiv({ cls: "loading-notice" });
       loadingEl.setText("Fetching remote vaults from cloud...");
       return;
     }
 
     if (this.vaults.length === 0) {
-      const emptyEl = contentEl.createDiv({ cls: "cloudsync-empty-notice" });
+      const emptyEl = contentEl.createDiv({ cls: "empty-notice" });
       emptyEl.setText(
         "No remote vaults found on your account. Create one above to get started."
       );
@@ -123,7 +123,7 @@ export class VaultPickerModal extends Modal {
     }
 
     const listContainer = contentEl.createDiv({
-      cls: "cloudsync-vault-list-container",
+      cls: "vault-list",
     });
 
     for (const v of this.vaults) {
@@ -131,11 +131,11 @@ export class VaultPickerModal extends Modal {
       const setting = new Setting(listContainer);
 
       const nameFrag = createFragment((f) => {
-        f.createSpan({ text: v.name, cls: "cloudsync-vault-name" });
+        f.createSpan({ text: v.name, cls: "vault-name" });
         if (isConnected) {
           f.createSpan({
             text: " Connected",
-            cls: "cloudsync-badge-connected",
+            cls: "badge-connected",
           });
         }
       });
@@ -237,16 +237,14 @@ export class VaultPickerModal extends Modal {
     const cs = this.plugin.settings.cloudsync;
     cs.vaultId = vaultName;
 
-    // Reset known revision so syncer does a clean comparison against the new vault
-    this.plugin.lastKnownRevision = 0;
+        this.plugin.lastKnownRevision = 0;
     await this.plugin.saveSettings();
 
-    new Notice(`Connected to remote vault "${vaultName}"!`);
+    new Notice(`Connected to remote vault "${vaultName}".`);
     this.onVaultChanged?.(vaultName);
     this.close();
 
-    // Trigger an immediate sync with the newly connected vault
-    window.setTimeout(() => {
+        window.setTimeout(() => {
       this.plugin.syncRun("manual");
     }, 300);
   }
@@ -266,7 +264,7 @@ export class VaultPickerModal extends Modal {
       });
 
       if (res.status === 200) {
-        new Notice(`Deleted remote vault "${vaultName}" from cloud.`);
+        new Notice(`Deleted remote vault "${vaultName}".`);
         if (cs.vaultId === vaultName) {
           cs.vaultId = "";
           await this.plugin.saveSettings();

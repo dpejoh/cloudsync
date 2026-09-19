@@ -69,7 +69,7 @@ export class CloudSyncSettingTab extends PluginSettingTab {
   async display(): Promise<void> {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.addClass("cloudsync-settings-page");
+    containerEl.addClass("sync-settings-page");
 
     const cs = this.plugin.settings.cloudsync;
     const isConfigured = Boolean(cs.serverUrl);
@@ -78,57 +78,57 @@ export class CloudSyncSettingTab extends PluginSettingTab {
       Boolean(cs.username || cs.email || cs.userId === "default");
 
     if (!isConfigured) {
-      containerEl.addClass("cloudsync-auth-active");
-      this.renderServerUrlPrompt(containerEl);
+      containerEl.addClass("is-auth-active");
+      this.renderServerUrlView(containerEl);
     } else if (!isAuthenticated) {
-      containerEl.addClass("cloudsync-auth-active");
-      this.renderAuthPrompt(containerEl);
+      containerEl.addClass("is-auth-active");
+      this.renderAuthView(containerEl);
     } else {
-      containerEl.removeClass("cloudsync-auth-active");
+      containerEl.removeClass("is-auth-active");
       await this.renderLoggedInView(containerEl);
     }
   }
 
   hide(): void {
     super.hide();
-    this.containerEl.removeClass("cloudsync-auth-active");
-    this.containerEl.removeClass("cloudsync-settings-page");
+    this.containerEl.removeClass("is-auth-active");
+    this.containerEl.removeClass("sync-settings-page");
   }
 
-  private renderServerUrlPrompt(containerEl: HTMLElement) {
-    const authWrapper = containerEl.createDiv({ cls: "cloudsync-auth-wrapper" });
-    const authBox = authWrapper.createDiv({ cls: "cloudsync-auth-box" });
+  private renderServerUrlView(containerEl: HTMLElement) {
+    const authWrapper = containerEl.createDiv({ cls: "auth-wrapper" });
+    const authBox = authWrapper.createDiv({ cls: "auth-card" });
 
-    const logoEl = authBox.createDiv({ cls: "cloudsync-auth-logo" });
+    const logoEl = authBox.createDiv({ cls: "auth-logo" });
     logoEl.createEl("img", {
-      cls: "cloudsync-logo-img",
-      attr: { src: OBSIDIAN_LOGO_PNG, alt: "Obsidian" },
+      cls: "auth-logo-img",
+      attr: { src: OBSIDIAN_LOGO_PNG, alt: "Logo" },
     });
 
     authBox.createDiv({
-      cls: "cloudsync-auth-title",
-      text: "Connect to CloudSync",
+      cls: "auth-title",
+      text: "Connect to sync server",
     });
     authBox.createDiv({
-      cls: "cloudsync-auth-subtitle",
+      cls: "auth-subtitle",
       text: "Enter your Cloudflare Worker or Private VPS server URL to begin.",
     });
 
     if (this.errorMessage) {
-      const errorEl = authBox.createDiv({ cls: "cloudsync-error-banner" });
+      const errorEl = authBox.createDiv({ cls: "error-banner" });
       errorEl.createSpan({ text: this.errorMessage });
     }
 
-    const form = authBox.createDiv({ cls: "cloudsync-auth-form" });
+    const form = authBox.createDiv({ cls: "auth-form" });
 
-    const urlGroup = form.createDiv({ cls: "cloudsync-input-group" });
+    const urlGroup = form.createDiv({ cls: "input-group" });
     urlGroup.createEl("label", {
       text: "Sync Server URL",
-      cls: "cloudsync-input-label",
+      cls: "input-label",
     });
     const urlInputEl = urlGroup.createEl("input", {
       type: "url",
-      cls: "cloudsync-text-input",
+      cls: "auth-input",
       value: this.serverUrlInput,
       placeholder: "https://my-sync.workers.dev or https://sync.myvps.com",
     });
@@ -143,7 +143,7 @@ export class CloudSyncSettingTab extends PluginSettingTab {
     };
 
     const connectBtn = form.createEl("button", {
-      cls: "mod-cta cloudsync-primary-btn",
+      cls: "mod-cta auth-submit-btn",
       text: this.isLoading ? "Connecting..." : "Connect to Server",
     });
     connectBtn.disabled = this.isLoading;
@@ -203,40 +203,40 @@ export class CloudSyncSettingTab extends PluginSettingTab {
     }
   }
 
-  private renderAuthPrompt(containerEl: HTMLElement) {
+  private renderAuthView(containerEl: HTMLElement) {
     const cs = this.plugin.settings.cloudsync;
     const isSingleMode = cs.mode === "single";
 
-    const authWrapper = containerEl.createDiv({ cls: "cloudsync-auth-wrapper" });
-    const authBox = authWrapper.createDiv({ cls: "cloudsync-auth-box" });
+    const authWrapper = containerEl.createDiv({ cls: "auth-wrapper" });
+    const authBox = authWrapper.createDiv({ cls: "auth-card" });
 
-    const logoEl = authBox.createDiv({ cls: "cloudsync-auth-logo" });
+    const logoEl = authBox.createDiv({ cls: "auth-logo" });
     logoEl.createEl("img", {
-      cls: "cloudsync-logo-img",
-      attr: { src: OBSIDIAN_LOGO_PNG, alt: "Obsidian" },
+      cls: "auth-logo-img",
+      attr: { src: OBSIDIAN_LOGO_PNG, alt: "Logo" },
     });
 
     if (this.requires2FA) {
-      this.render2FAPrompt(authBox);
+      this.render2FAView(authBox);
       return;
     }
 
     if (isSingleMode) {
       authBox.createDiv({
-        cls: "cloudsync-auth-title",
-        text: "Unlock CloudSync",
+        cls: "auth-title",
+        text: "Unlock account",
       });
       authBox.createDiv({
-        cls: "cloudsync-auth-subtitle",
+        cls: "auth-subtitle",
         text: `Server: ${cs.serverUrl}`,
       });
     } else if (this.isRecoveryMode) {
       authBox.createDiv({
-        cls: "cloudsync-auth-title",
+        cls: "auth-title",
         text: "Reset your password",
       });
       authBox.createDiv({
-        cls: "cloudsync-auth-subtitle",
+        cls: "auth-subtitle",
         text:
           this.recoveryMethod === "totp"
             ? "Enter your username, 2FA code from your authenticator app, and new password."
@@ -244,40 +244,40 @@ export class CloudSyncSettingTab extends PluginSettingTab {
       });
     } else if (this.isRegisterMode) {
       authBox.createDiv({
-        cls: "cloudsync-auth-title",
+        cls: "auth-title",
         text: "Create an account",
       });
       authBox.createDiv({
-        cls: "cloudsync-auth-subtitle",
+        cls: "auth-subtitle",
         text: `Server: ${cs.serverUrl}`,
       });
     } else {
       authBox.createDiv({
-        cls: "cloudsync-auth-title",
-        text: "Sign in to CloudSync",
+        cls: "auth-title",
+        text: "Sign in",
       });
       authBox.createDiv({
-        cls: "cloudsync-auth-subtitle",
+        cls: "auth-subtitle",
         text: `Server: ${cs.serverUrl}`,
       });
     }
 
     if (this.errorMessage) {
-      const errorEl = authBox.createDiv({ cls: "cloudsync-error-banner" });
+      const errorEl = authBox.createDiv({ cls: "error-banner" });
       errorEl.createSpan({ text: this.errorMessage });
     }
 
-    const form = authBox.createDiv({ cls: "cloudsync-auth-form" });
+    const form = authBox.createDiv({ cls: "auth-form" });
 
     if (isSingleMode) {
-      const passwordGroup = form.createDiv({ cls: "cloudsync-input-group" });
+      const passwordGroup = form.createDiv({ cls: "input-group" });
       passwordGroup.createEl("label", {
         text: "Master Password",
-        cls: "cloudsync-input-label",
+        cls: "input-label",
       });
       const passwordInputEl = passwordGroup.createEl("input", {
         type: "password",
-        cls: "cloudsync-text-input",
+        cls: "auth-input",
         value: this.passwordInput,
         placeholder: "Enter master password",
       });
@@ -290,17 +290,17 @@ export class CloudSyncSettingTab extends PluginSettingTab {
       };
 
       const unlockBtn = form.createEl("button", {
-        cls: "mod-cta cloudsync-primary-btn",
+        cls: "mod-cta auth-submit-btn",
         text: this.isLoading ? "Unlocking..." : "Connect & Sync",
       });
       unlockBtn.disabled = this.isLoading;
       unlockBtn.onclick = () => this.handleSingleLogin();
     } else if (this.isRecoveryMode) {
-      const userGroup = form.createDiv({ cls: "cloudsync-input-group" });
-      userGroup.createEl("label", { text: "Username", cls: "cloudsync-input-label" });
+      const userGroup = form.createDiv({ cls: "input-group" });
+      userGroup.createEl("label", { text: "Username", cls: "input-label" });
       const userInputEl = userGroup.createEl("input", {
         type: "text",
-        cls: "cloudsync-text-input",
+        cls: "auth-input",
         value: this.usernameInput,
         placeholder: "username",
       });
@@ -310,10 +310,10 @@ export class CloudSyncSettingTab extends PluginSettingTab {
       };
 
       if (this.recoveryMethod === "totp") {
-        const totpGroup = form.createDiv({ cls: "cloudsync-input-group" });
+        const totpGroup = form.createDiv({ cls: "input-group" });
         totpGroup.createEl("label", {
           text: "2FA Verification Code",
-          cls: "cloudsync-input-label",
+          cls: "input-label",
         });
         createOtpInput(totpGroup, {
           length: 6,
@@ -325,14 +325,14 @@ export class CloudSyncSettingTab extends PluginSettingTab {
           },
         });
       } else {
-        const recGroup = form.createDiv({ cls: "cloudsync-input-group" });
+        const recGroup = form.createDiv({ cls: "input-group" });
         recGroup.createEl("label", {
           text: "Recovery Key",
-          cls: "cloudsync-input-label",
+          cls: "input-label",
         });
         const recInputEl = recGroup.createEl("input", {
           type: "text",
-          cls: "cloudsync-text-input",
+          cls: "auth-input",
           value: this.recoveryKeyInput,
           placeholder: "SYNC-XXXX-XXXX-XXXX-XXXX",
         });
@@ -342,14 +342,14 @@ export class CloudSyncSettingTab extends PluginSettingTab {
         };
       }
 
-      const newPassGroup = form.createDiv({ cls: "cloudsync-input-group" });
+      const newPassGroup = form.createDiv({ cls: "input-group" });
       newPassGroup.createEl("label", {
         text: "New Password",
-        cls: "cloudsync-input-label",
+        cls: "input-label",
       });
       const newPassInputEl = newPassGroup.createEl("input", {
         type: "password",
-        cls: "cloudsync-text-input",
+        cls: "auth-input",
         value: this.passwordInput,
         placeholder: "••••••••",
       });
@@ -362,15 +362,15 @@ export class CloudSyncSettingTab extends PluginSettingTab {
       };
 
       const resetBtn = form.createEl("button", {
-        cls: "mod-cta cloudsync-primary-btn",
+        cls: "mod-cta auth-submit-btn",
         text: this.isLoading ? "Resetting..." : "Reset Password & Sign In",
       });
       resetBtn.disabled = this.isLoading;
       resetBtn.onclick = () => this.handleRecoverySubmit();
 
-      const switchMethodRow = authBox.createDiv({ cls: "cloudsync-switch-row" });
+      const switchMethodRow = authBox.createDiv({ cls: "switch-row" });
       const switchMethodLink = switchMethodRow.createEl("a", {
-        cls: "cloudsync-inline-link",
+        cls: "inline-link",
         text:
           this.recoveryMethod === "totp"
             ? "Have a recovery key instead? Use recovery key"
@@ -382,9 +382,9 @@ export class CloudSyncSettingTab extends PluginSettingTab {
         this.display();
       };
 
-      const backRow = authBox.createDiv({ cls: "cloudsync-switch-row" });
+      const backRow = authBox.createDiv({ cls: "switch-row" });
       const backLink = backRow.createEl("a", {
-        cls: "cloudsync-inline-link",
+        cls: "inline-link",
         text: "← Back to Sign in",
       });
       backLink.onclick = () => {
@@ -393,11 +393,11 @@ export class CloudSyncSettingTab extends PluginSettingTab {
         this.display();
       };
     } else {
-      const userGroup = form.createDiv({ cls: "cloudsync-input-group" });
-      userGroup.createEl("label", { text: "Username", cls: "cloudsync-input-label" });
+      const userGroup = form.createDiv({ cls: "input-group" });
+      userGroup.createEl("label", { text: "Username", cls: "input-label" });
       const userInputEl = userGroup.createEl("input", {
         type: "text",
-        cls: "cloudsync-text-input",
+        cls: "auth-input",
         value: this.usernameInput,
         placeholder: "username",
       });
@@ -406,16 +406,16 @@ export class CloudSyncSettingTab extends PluginSettingTab {
         this.errorMessage = null;
       };
 
-      const passGroup = form.createDiv({ cls: "cloudsync-input-group" });
-      const passLabelRow = passGroup.createDiv({ cls: "cloudsync-label-row" });
+      const passGroup = form.createDiv({ cls: "input-group" });
+      const passLabelRow = passGroup.createDiv({ cls: "label-row" });
       passLabelRow.createEl("label", {
         text: "Password",
-        cls: "cloudsync-input-label",
+        cls: "input-label",
       });
 
       if (!this.isRegisterMode) {
         const forgotLink = passLabelRow.createEl("span", {
-          cls: "cloudsync-forgot-link",
+          cls: "forgot-link",
           text: "Forgot password?",
         });
         forgotLink.onclick = () => {
@@ -427,7 +427,7 @@ export class CloudSyncSettingTab extends PluginSettingTab {
 
       const passInputEl = passGroup.createEl("input", {
         type: "password",
-        cls: "cloudsync-text-input",
+        cls: "auth-input",
         value: this.passwordInput,
       });
       passInputEl.oninput = (e) => {
@@ -439,7 +439,7 @@ export class CloudSyncSettingTab extends PluginSettingTab {
       };
 
       const submitBtn = form.createEl("button", {
-        cls: "mod-cta cloudsync-primary-btn",
+        cls: "mod-cta auth-submit-btn",
         text: this.isLoading
           ? "Connecting..."
           : this.isRegisterMode
@@ -449,11 +449,11 @@ export class CloudSyncSettingTab extends PluginSettingTab {
       submitBtn.disabled = this.isLoading;
       submitBtn.onclick = () => this.handleMultiAuthSubmit();
 
-      const switchRow = authBox.createDiv({ cls: "cloudsync-switch-row" });
+      const switchRow = authBox.createDiv({ cls: "switch-row" });
       if (!this.isRegisterMode) {
         switchRow.createSpan({ text: "Don’t have an account? " });
         const switchLink = switchRow.createEl("a", {
-          cls: "cloudsync-inline-link",
+          cls: "inline-link",
           text: "Create an account",
         });
         switchLink.onclick = () => {
@@ -464,7 +464,7 @@ export class CloudSyncSettingTab extends PluginSettingTab {
       } else {
         switchRow.createSpan({ text: "Already have an account? " });
         const switchLink = switchRow.createEl("a", {
-          cls: "cloudsync-inline-link",
+          cls: "inline-link",
           text: "Sign in",
         });
         switchLink.onclick = () => {
@@ -475,10 +475,10 @@ export class CloudSyncSettingTab extends PluginSettingTab {
       }
     }
 
-    const changeUrlRow = authBox.createDiv({ cls: "cloudsync-switch-row" });
+    const changeUrlRow = authBox.createDiv({ cls: "switch-row" });
     changeUrlRow.style.marginTop = "14px";
     const changeUrlLink = changeUrlRow.createEl("a", {
-      cls: "cloudsync-inline-link",
+      cls: "inline-link",
       text: "Change Worker URL",
     });
     changeUrlLink.onclick = async () => {
@@ -490,22 +490,22 @@ export class CloudSyncSettingTab extends PluginSettingTab {
     };
   }
 
-  private render2FAPrompt(authBox: HTMLElement) {
+  private render2FAView(authBox: HTMLElement) {
     authBox.createDiv({
-      cls: "cloudsync-auth-title",
+      cls: "auth-title",
       text: "Two-factor authentication",
     });
     authBox.createDiv({
-      cls: "cloudsync-auth-subtitle",
+      cls: "auth-subtitle",
       text: `Enter the 6-digit code from your authenticator app for "${this.usernameInput}".`,
     });
 
     if (this.errorMessage) {
-      const errorEl = authBox.createDiv({ cls: "cloudsync-error-banner" });
+      const errorEl = authBox.createDiv({ cls: "error-banner" });
       errorEl.createSpan({ text: this.errorMessage });
     }
 
-    const form = authBox.createDiv({ cls: "cloudsync-auth-form" });
+    const form = authBox.createDiv({ cls: "auth-form" });
 
     createOtpInput(form, {
       length: 6,
@@ -522,15 +522,15 @@ export class CloudSyncSettingTab extends PluginSettingTab {
     });
 
     const verifyBtn = form.createEl("button", {
-      cls: "mod-cta cloudsync-primary-btn cloudsync-otp-action-btn",
+      cls: "mod-cta auth-submit-btn otp-action-btn",
       text: this.isLoading ? "Verifying..." : "Verify & Sign in",
     });
     verifyBtn.disabled = this.isLoading;
     verifyBtn.onclick = () => this.handleMultiAuthSubmit();
 
-    const backRow = authBox.createDiv({ cls: "cloudsync-switch-row" });
+    const backRow = authBox.createDiv({ cls: "switch-row" });
     const backLink = backRow.createEl("a", {
-      cls: "cloudsync-inline-link",
+      cls: "inline-link",
       text: "← Back to Sign in",
     });
     backLink.onclick = () => {
@@ -585,7 +585,7 @@ export class CloudSyncSettingTab extends PluginSettingTab {
       await this.plugin.saveSettings();
       await this.plugin.autoRegisterDevice();
 
-      new Notice("CloudSync connected successfully!");
+      new Notice("Connected to server.");
       this.isLoading = false;
       this.display();
     } catch (err: any) {
@@ -645,9 +645,9 @@ export class CloudSyncSettingTab extends PluginSettingTab {
         await this.plugin.autoRegisterDevice();
 
         this.isLoading = false;
-        new Notice("CloudSync account created!");
+        new Notice("Account created.");
 
-        new TwoFactorModal(this.app, this.plugin, "prompt", () => {
+        new TwoFactorModal(this.app, this.plugin, "intro", () => {
           this.display();
         }).open();
       } else {
@@ -689,7 +689,7 @@ export class CloudSyncSettingTab extends PluginSettingTab {
         await this.plugin.saveSettings();
         await this.plugin.autoRegisterDevice();
 
-        new Notice("Successfully signed in to CloudSync!");
+        new Notice("Signed in.");
         this.isLoading = false;
         this.display();
       }
@@ -771,7 +771,7 @@ export class CloudSyncSettingTab extends PluginSettingTab {
       await this.plugin.saveSettings();
       await this.plugin.autoRegisterDevice();
 
-      new Notice("Password reset successful! Signed in to CloudSync.");
+      new Notice("Password updated. Signed in.");
       this.isLoading = false;
       this.isRecoveryMode = false;
       this.display();
@@ -790,7 +790,7 @@ export class CloudSyncSettingTab extends PluginSettingTab {
 
     if (cs.mode === "multi" && !cs.has2FA) {
       new Setting(containerEl)
-        .setClass("cloudsync-2fa-banner")
+        .setClass("banner-2fa")
         .setName("Two-factor authentication is not enabled")
         .setDesc("Protect your account from unauthorized access and enable verification.")
         .addButton((btn) => {
@@ -805,557 +805,20 @@ export class CloudSyncSettingTab extends PluginSettingTab {
         });
     }
 
-    if (cs.vaultId) {
-      new Setting(containerEl)
-        .setName("Remote vault")
-        .setDesc(`Currently connected to the “${cs.vaultId}” remote vault.`)
-        .addButton((btn) => {
-          btn
-            .setButtonText("Disconnect")
-            .setClass("mod-destructive")
-            .onClick(async () => {
-              if (
-                !confirm(
-                  `Are you sure you want to disconnect from "${cs.vaultId}"?\n\nYour local files will not be deleted, but syncing will be paused until you connect to a vault.`
-                )
-              ) {
-                return;
-              }
-              const disconnectedVault = cs.vaultId;
-              cs.vaultId = "";
-              await this.plugin.saveSettings();
-              new Notice(`Disconnected from remote vault "${disconnectedVault}".`);
-              this.display();
-            });
-        })
-        .addButton((btn) => {
-          btn
-            .setButtonText("Switch")
-            .onClick(() => {
-              new VaultPickerModal(this.app, this.plugin, () => this.display()).open();
-            });
-        })
-        .addButton((btn) => {
-          btn
-            .setButtonText("Manage")
-            .onClick(() => {
-              new VaultShareModal(this.app, this.plugin, cs.vaultId).open();
-            });
-        });
-    } else {
-      new Setting(containerEl)
-        .setName("Remote vault")
-        .setDesc(
-          "No remote vault connected to this device. Choose an existing vault or create a new one to begin syncing."
-        )
-        .addButton((btn) => {
-          btn
-            .setButtonText("Choose")
-            .setCta()
-            .onClick(() => {
-              new VaultPickerModal(this.app, this.plugin, () => this.display()).open();
-            });
-        });
-    }
-
-    const isPaused = this.plugin.settings.isSyncPaused ?? false;
-    const hasVault = !!cs.vaultId;
+    // 1. Account & Server
     new Setting(containerEl)
-      .setName("Sync status")
-      .setDesc(
-        !hasVault
-          ? "Connect to a remote vault above to enable syncing."
-          : isPaused
-          ? "Obsidian Sync is currently paused."
-          : "Obsidian Sync is currently running."
-      )
-      .addButton((btn) => {
-        btn.setDisabled(!hasVault);
-        if (isPaused) {
-          btn
-            .setButtonText("Resume")
-            .setCta()
-            .onClick(async () => {
-              this.plugin.settings.isSyncPaused = false;
-              await this.plugin.saveSettings();
-              new Notice("Resumed sync.");
-              this.display();
-              this.plugin.syncRun("manual");
-            });
-        } else {
-          btn
-            .setButtonText("Pause")
-            .onClick(async () => {
-              this.plugin.settings.isSyncPaused = true;
-              await this.plugin.saveSettings();
-              new Notice("Paused sync.");
-              this.display();
-            });
-        }
-      })
-      .addButton((btn) => {
-        btn
-          .setButtonText("Sync now")
-          .setDisabled(!hasVault)
-          .onClick(async () => {
-            new Notice("Starting sync...");
-            await this.plugin.syncRun("manual");
-          });
-      });
-
-    initDeviceIdentity(this.plugin.settings);
-    new Setting(containerEl)
-      .setName("Device name")
-      .setDesc("This name will be displayed in the activity log. Leave empty to use the default name.")
-      .addText((text) => {
-        text
-          .setPlaceholder(this.plugin.settings.deviceName || "My Device")
-          .setValue(this.plugin.settings.deviceName ?? "")
-          .onChange(async (val) => {
-            const name = val.trim() || "My Device";
-            this.plugin.settings.deviceName = name;
-            await this.plugin.saveSettings();
-            const { fsRemote } = this.plugin.getOrCreateClients();
-            if (
-              fsRemote &&
-              typeof (fsRemote as any).registerDevice === "function"
-            ) {
-              await (fsRemote as any).registerDevice({
-                deviceId: this.plugin.settings.deviceId!,
-                deviceName: this.plugin.settings.deviceName,
-                platform: Platform.isMobile ? "mobile" : "desktop",
-                lastBackup: this.plugin.settings.lastSettingsBackupTime,
-              });
-            }
-          });
-      });
-
-    new Setting(containerEl)
-      .setName("Conflict resolution")
-      .setDesc("Choose how conflicts are resolved when a note is independently modified on multiple devices.")
-      .addDropdown((drop) => {
-        drop
-          .addOption("keep_newer", "Keep newer version")
-          .addOption("keep_larger", "Keep larger version")
-          .setValue(
-            this.plugin.settings.conflictAction === "keep_larger"
-              ? "keep_larger"
-              : "keep_newer"
-          )
-          .onChange(async (val: any) => {
-            this.plugin.settings.conflictAction = val;
-            await this.plugin.saveSettings();
-          });
-      });
-
-    new Setting(containerEl)
-      .setName("Deleted files")
-      .setDesc("View and restore deleted files.")
-      .addButton((btn) => {
-        btn
-          .setButtonText("View")
-          .onClick(() => {
-            new DeletedFilesModal(this.app, this.plugin, false).open();
-          });
-      })
-      .addButton((btn) => {
-        btn
-          .setButtonText("Bulk restore")
-          .onClick(() => {
-            new DeletedFilesModal(this.app, this.plugin, true).open();
-          });
-      });
-
-    new Setting(containerEl)
-      .setName("Sync log")
-      .setDesc("View recent sync activities for debugging.")
-      .addButton((btn) => {
-        btn
-          .setButtonText("View")
-          .onClick(() => {
-            new SyncLogModal(this.app, this.plugin).open();
-          });
-      });
-
-    if (this.storageUsedBytes !== null) {
-      const mb = (this.storageUsedBytes / (1024 * 1024)).toFixed(2);
-      const gbLimit = "10.00";
-      const pct = (
-        (this.storageUsedBytes / (10 * 1024 * 1024 * 1024)) *
-        100
-      ).toFixed(2);
-
-      const storageSetting = new Setting(containerEl)
-        .setName("Storage usage")
-        .setDesc(`You are using ${mb} MB out of ${gbLimit} GB (${pct}%)`);
-
-      const barTrack = storageSetting.controlEl.createDiv({
-        cls: "cloudsync-storage-track",
-      });
-      const barFill = barTrack.createDiv({ cls: "cloudsync-storage-fill" });
-      barFill.style.width = `${Math.min(100, Math.max(1, Number.parseFloat(pct)))}%`;
-    }
-
-    containerEl.createEl("h3", { text: "Selective sync" });
-
-    const ignoredFolders = this.plugin.settings.ignorePaths || [];
-    const excludedDescFrag = createFragment((f) => {
-      f.appendText("Prevent certain folders from being synced.");
-      if (ignoredFolders.length > 0) {
-        f.appendText(" These folders are currently excluded:");
-        const ul = f.createEl("ul");
-        for (const folder of ignoredFolders) {
-          ul.createEl("li", { text: folder });
-        }
-      }
-    });
-
-    new Setting(containerEl)
-      .setName("Excluded folders")
-      .setDesc(excludedDescFrag)
-      .addButton((btn) => {
-        btn
-          .setButtonText("Manage")
-          .onClick(() => {
-            new ExcludedFoldersModal(this.app, this.plugin).open();
-          });
-      });
-
-    new Setting(containerEl)
-      .setName("Sync images")
-      .setDesc("Sync image files with these extensions: bmp, png, jpg, jpeg, gif, svg, webp.")
-      .addToggle((toggle) => {
-        toggle
-          .setValue(this.plugin.settings.syncImages ?? true)
-          .onChange(async (val) => {
-            this.plugin.settings.syncImages = val;
-            await this.plugin.saveSettings();
-          });
-      });
-
-    new Setting(containerEl)
-      .setName("Sync audio")
-      .setDesc("Sync audio files with these extensions: mp3, wav, m4a, 3gp, flac, ogg, oga, opus.")
-      .addToggle((toggle) => {
-        toggle
-          .setValue(this.plugin.settings.syncAudio ?? false)
-          .onChange(async (val) => {
-            this.plugin.settings.syncAudio = val;
-            await this.plugin.saveSettings();
-          });
-      });
-
-    new Setting(containerEl)
-      .setName("Sync videos")
-      .setDesc("Sync video files with these extensions: mp4, webm, ogv, mov, mkv.")
-      .addToggle((toggle) => {
-        toggle
-          .setValue(this.plugin.settings.syncVideos ?? false)
-          .onChange(async (val) => {
-            this.plugin.settings.syncVideos = val;
-            await this.plugin.saveSettings();
-          });
-      });
-
-    new Setting(containerEl)
-      .setName("Sync PDFs")
-      .setDesc("Sync PDF files.")
-      .addToggle((toggle) => {
-        toggle
-          .setValue(this.plugin.settings.syncPdfs ?? true)
-          .onChange(async (val) => {
-            this.plugin.settings.syncPdfs = val;
-            await this.plugin.saveSettings();
-          });
-      });
-
-    new Setting(containerEl)
-      .setName("Sync all other types")
-      .setDesc("Sync unsupported file types.")
-      .addToggle((toggle) => {
-        toggle
-          .setValue(this.plugin.settings.syncUnsupported ?? false)
-          .onChange(async (val) => {
-            this.plugin.settings.syncUnsupported = val;
-            await this.plugin.saveSettings();
-          });
-      });
-
-    containerEl.createEl("h3", { text: "Vault configuration sync" });
-
-    new Setting(containerEl)
-      .setName("Main settings")
-      .setDesc("Enable to sync editor settings, files & links settings, etc.")
-      .addToggle((toggle) => {
-        toggle
-          .setValue(this.plugin.settings.syncMainSettings ?? false)
-          .onChange(async (val) => {
-            this.plugin.settings.syncMainSettings = val;
-            await this.plugin.saveSettings();
-          });
-      });
-
-    new Setting(containerEl)
-      .setName("Appearance settings")
-      .setDesc("Sync appearance settings like dark mode, active theme, and enabled snippets.")
-      .addToggle((toggle) => {
-        toggle
-          .setValue(this.plugin.settings.syncAppearance ?? false)
-          .onChange(async (val) => {
-            this.plugin.settings.syncAppearance = val;
-            await this.plugin.saveSettings();
-          });
-      });
-
-    new Setting(containerEl)
-      .setName("Themes and snippets")
-      .setDesc("Sync downloaded themes and snippets. Whether they are enabled depends on the previous setting.")
-      .addToggle((toggle) => {
-        toggle
-          .setValue(this.plugin.settings.syncAppearanceData ?? false)
-          .onChange(async (val) => {
-            this.plugin.settings.syncAppearanceData = val;
-            await this.plugin.saveSettings();
-          });
-      });
-
-    new Setting(containerEl)
-      .setName("Hotkeys")
-      .setDesc("Sync custom hotkeys.")
-      .addToggle((toggle) => {
-        toggle
-          .setValue(this.plugin.settings.syncHotkeys ?? false)
-          .onChange(async (val) => {
-            this.plugin.settings.syncHotkeys = val;
-            await this.plugin.saveSettings();
-          });
-      });
-
-    new Setting(containerEl)
-      .setName("Active core plugin list")
-      .setDesc("Sync which core plugins are enabled.")
-      .addToggle((toggle) => {
-        toggle
-          .setValue(this.plugin.settings.syncCorePlugins ?? false)
-          .onChange(async (val) => {
-            this.plugin.settings.syncCorePlugins = val;
-            await this.plugin.saveSettings();
-          });
-      });
-
-    new Setting(containerEl)
-      .setName("Core plugin settings")
-      .setDesc("Sync core plugin settings.")
-      .addToggle((toggle) => {
-        toggle
-          .setValue(this.plugin.settings.syncCorePluginData ?? false)
-          .onChange(async (val) => {
-            this.plugin.settings.syncCorePluginData = val;
-            await this.plugin.saveSettings();
-          });
-      });
-
-    new Setting(containerEl)
-      .setName("Active community plugin list")
-      .setDesc("Sync which community plugins are enabled.")
-      .addToggle((toggle) => {
-        toggle
-          .setValue(this.plugin.settings.syncCommunityPlugins ?? false)
-          .onChange(async (val) => {
-            this.plugin.settings.syncCommunityPlugins = val;
-            await this.plugin.saveSettings();
-          });
-      });
-
-    new Setting(containerEl)
-      .setName("Installed community plugins")
-      .setDesc("Sync installed community plugins (.js, .css, and manifest.json files) and their settings.")
-      .addToggle((toggle) => {
-        toggle
-          .setValue(this.plugin.settings.syncCommunityPluginData ?? false)
-          .onChange(async (val) => {
-            this.plugin.settings.syncCommunityPluginData = val;
-            await this.plugin.saveSettings();
-          });
-      });
-
-    new Setting(containerEl)
-      .setName("Connected devices & backups")
-      .setDesc("Device-specific configurations and snapshots for this vault")
-      .setHeading()
-      .addButton((btn) => {
-        btn.setButtonText("Refresh").onClick(async () => {
-          btn.setDisabled(true);
-          btn.setButtonText("Refreshing...");
-          await this.plugin.autoRegisterDevice().catch(() => {});
-          this.display();
-        });
-      });
-
-    const thisDeviceSetting = new Setting(containerEl)
-      .setName(`${this.plugin.settings.deviceName || "My Device"} (This device)`)
-      .setDesc(
-        this.plugin.settings.lastSettingsBackupTime
-          ? `Last backed up: ${new Date(
-              this.plugin.settings.lastSettingsBackupTime
-            ).toLocaleString()}`
-          : "Never backed up to cloud"
-      )
-      .addButton((btn) => {
-        btn
-          .setButtonText("Backup now")
-          .setCta()
-          .onClick(async () => {
-            btn.setDisabled(true);
-            btn.setButtonText("Backing up...");
-            const { fsEncrypt, fsRemote } = this.plugin.getOrCreateClients();
-            try {
-              const res = await backupDeviceSettings(
-                this.app,
-                fsEncrypt,
-                fsRemote as FakeFsWorker,
-                this.plugin.settings,
-                (msg) => {
-                  thisDeviceSetting.setDesc(msg);
-                }
-              );
-              await this.plugin.saveSettings();
-              thisDeviceSetting.setDesc(
-                `Last backed up: ${new Date(res.timestamp).toLocaleString()} (${
-                  res.fileCount
-                } files)`
-              );
-              new Notice(
-                `CloudSync: Successfully backed up ${res.fileCount} settings files!`
-              );
-              btn.setButtonText("Backed up!");
-              window.setTimeout(() => {
-                btn.setDisabled(false);
-                btn.setButtonText("Backup now");
-              }, 2000);
-            } catch (err: any) {
-              btn.setDisabled(false);
-              btn.setButtonText("Backup now");
-              new Notice(
-                `CloudSync: Failed to backup settings: ${err?.message || err}`
-              );
-            }
-          });
-      });
-
-    const otherDevicesContainer = containerEl.createDiv();
-    new Setting(otherDevicesContainer)
-      .setName("Loading other devices...")
-      .setDesc("Fetching connected devices from cloud");
-
-    const { fsRemote, fsEncrypt } = this.plugin.getOrCreateClients();
-    if (fsRemote && typeof (fsRemote as any).getDevices === "function") {
-      const workerClient = fsRemote as FakeFsWorker;
-      this.plugin.autoRegisterDevice().catch(() => {});
-
-      const timeoutPromise = new Promise<DeviceInfo[]>((_, reject) =>
-        setTimeout(() => reject(new Error("Request timed out")), 8000)
-      );
-
-      Promise.race([workerClient.getDevices(), timeoutPromise])
-        .then((devices: DeviceInfo[]) => {
-          otherDevicesContainer.empty();
-          const otherDevices = (devices || []).filter(
-            (d) => d.deviceId !== this.plugin.settings.deviceId
-          );
-
-          if (otherDevices.length === 0) {
-            new Setting(otherDevicesContainer)
-              .setName("No other devices")
-              .setDesc("No other devices detected on this vault yet.");
-            return;
-          }
-
-          for (const dev of otherDevices) {
-            const platformLabel =
-              dev.platform === "mobile" ? "Mobile" : "Desktop";
-            const backupDesc = dev.lastBackup
-              ? `Last backed up: ${new Date(dev.lastBackup).toLocaleString()}${
-                  dev.fileCount ? ` (${dev.fileCount} files)` : ""
-                }`
-              : "No backup created yet";
-
-            new Setting(otherDevicesContainer)
-              .setName(`${dev.deviceName} (${platformLabel})`)
-              .setDesc(backupDesc)
-              .addButton((restoreBtn) => {
-                restoreBtn
-                  .setButtonText("Restore to this device")
-                  .setDisabled(!dev.lastBackup)
-                  .onClick(async () => {
-                    if (
-                      !confirm(
-                        `Restore settings from "${dev.deviceName}"?\n\nThis will apply themes, snippets, and plugin settings from that device to this one. Your notes will remain completely untouched.`
-                      )
-                    ) {
-                      return;
-                    }
-
-                    restoreBtn.setDisabled(true);
-                    restoreBtn.setButtonText("Restoring...");
-                    try {
-                      const res = await restoreDeviceSettings(
-                        this.app,
-                        fsEncrypt,
-                        dev.deviceId,
-                        (msg) => new Notice(`CloudSync: ${msg}`, 1500)
-                      );
-                      restoreBtn.setButtonText("Restored!");
-                      new Notice(
-                        `CloudSync: Restored ${res.restoredCount} configuration files! Please reload Obsidian to apply changes.`,
-                        6000
-                      );
-                      window.setTimeout(() => {
-                        restoreBtn.setDisabled(false);
-                        restoreBtn.setButtonText("Restore to this device");
-                      }, 3000);
-                    } catch (err: any) {
-                      restoreBtn.setDisabled(false);
-                      restoreBtn.setButtonText("Restore to this device");
-                      new Notice(
-                        `CloudSync: Failed to restore settings: ${
-                          err?.message || err
-                        }`
-                      );
-                    }
-                  });
-              });
-          }
-        })
-        .catch((err) => {
-          console.error("CloudSync: Failed to load devices:", err);
-          otherDevicesContainer.empty();
-          new Setting(otherDevicesContainer)
-            .setName("Could not load other devices")
-            .setDesc("Check your network connection and click Refresh above.");
-        });
-    } else {
-      otherDevicesContainer.empty();
-      new Setting(otherDevicesContainer)
-        .setName("Other devices")
-        .setDesc("Device backups will be available once connected to CloudSync.");
-    }
-
-    containerEl.createEl("h3", { text: "Account & Automation" });
+      .setName("Account & Server")
+      .setHeading();
 
     new Setting(containerEl)
       .setName("Signed in as")
-      .setDesc(cs.username || (cs.mode === "single" ? "Personal Worker" : "User"))
+      .setDesc(`${cs.username || (cs.mode === "single" ? "Personal Worker" : "User")} • ${cs.serverUrl}`)
       .addButton((btn) => {
         btn
           .setButtonText("Log out")
           .setClass("mod-destructive")
           .onClick(async () => {
-            if (
-              !confirm(
-                "Are you sure you want to log out of your CloudSync account on this device?"
-              )
-            ) {
+            if (!confirm("Are you sure you want to log out on this device?")) {
               return;
             }
             cs.token = "";
@@ -1370,14 +833,29 @@ export class CloudSyncSettingTab extends PluginSettingTab {
             } catch (e) {
               console.warn("Logout db destroy skipped:", e);
             }
-            new Notice("Logged out of CloudSync.");
+            new Notice("Logged out.");
             this.display();
           });
       });
 
-    new Setting(containerEl)
-      .setName("Server URL")
-      .setDesc(cs.serverUrl);
+    if (this.storageUsedBytes !== null) {
+      const mb = (this.storageUsedBytes / (1024 * 1024)).toFixed(2);
+      const gbLimit = "10.00";
+      const pct = (
+        (this.storageUsedBytes / (10 * 1024 * 1024 * 1024)) *
+        100
+      ).toFixed(2);
+
+      const storageSetting = new Setting(containerEl)
+        .setName("Storage usage")
+        .setDesc(`Using ${mb} MB of ${gbLimit} GB (${pct}%)`);
+
+      const barTrack = storageSetting.controlEl.createDiv({
+        cls: "storage-bar-track",
+      });
+      const barFill = barTrack.createDiv({ cls: "storage-bar-fill" });
+      barFill.style.width = `${Math.min(100, Math.max(1, Number.parseFloat(pct)))}%`;
+    }
 
     if (cs.mode === "multi") {
       new Setting(containerEl)
@@ -1450,50 +928,122 @@ export class CloudSyncSettingTab extends PluginSettingTab {
         });
     }
 
+    // 2. Vault & Sync Controls
     new Setting(containerEl)
-      .setName("Sync on startup")
-      .setDesc("Automatically sync when Obsidian opens")
-      .addToggle((toggle) => {
-        toggle
-          .setValue((this.plugin.settings.initRunAfterMilliseconds ?? -1) > 0)
-          .onChange(async (val) => {
-            this.plugin.settings.initRunAfterMilliseconds = val ? 2000 : -1;
-            await this.plugin.saveSettings();
-          });
-      });
+      .setName("Remote Vault & Sync Controls")
+      .setHeading();
 
-    new Setting(containerEl)
-      .setName("Sync on save / edit")
-      .setDesc("Sync automatically a few seconds after changes")
-      .addToggle((toggle) => {
-        toggle
-          .setValue((this.plugin.settings.syncOnSaveAfterMilliseconds ?? -1) > 0)
-          .onChange(async (val) => {
-            this.plugin.settings.syncOnSaveAfterMilliseconds = val ? 3000 : -1;
-            await this.plugin.saveSettings();
-          });
-      });
+    if (cs.vaultId) {
+      new Setting(containerEl)
+        .setName("Connected remote vault")
+        .setDesc(`Currently syncing with remote vault "${cs.vaultId}".`)
+        .addButton((btn) => {
+          btn
+            .setButtonText("Disconnect")
+            .setClass("mod-destructive")
+            .onClick(async () => {
+              if (
+                !confirm(
+                  `Are you sure you want to disconnect from "${cs.vaultId}"?\n\nLocal files will remain intact, but syncing will stop until reconnected.`
+                )
+              ) {
+                return;
+              }
+              const disconnectedVault = cs.vaultId;
+              cs.vaultId = "";
+              await this.plugin.saveSettings();
+              new Notice(`Disconnected from remote vault "${disconnectedVault}".`);
+              this.display();
+            });
+        })
+        .addButton((btn) => {
+          btn
+            .setButtonText("Switch vault")
+            .onClick(() => {
+              new VaultPickerModal(this.app, this.plugin, () => this.display()).open();
+            });
+        })
+        .addButton((btn) => {
+          btn
+            .setButtonText("Collaborators")
+            .onClick(() => {
+              new VaultShareModal(this.app, this.plugin, cs.vaultId).open();
+            });
+        });
+    } else {
+      new Setting(containerEl)
+        .setName("Connected remote vault")
+        .setDesc("No remote vault connected. Choose an existing vault or create a new one.")
+        .addButton((btn) => {
+          btn
+            .setButtonText("Choose vault")
+            .setCta()
+            .onClick(() => {
+              new VaultPickerModal(this.app, this.plugin, () => this.display()).open();
+            });
+        });
+    }
 
+    const isPaused = this.plugin.settings.isSyncPaused ?? false;
+    const hasVault = !!cs.vaultId;
     new Setting(containerEl)
-      .setName("Show sync notifications")
+      .setName("Sync status")
       .setDesc(
-        "Display a pop-up notice whenever files are synced. Disabled by default to avoid alerts on small edits."
+        !hasVault
+          ? "Connect to a remote vault above to enable syncing."
+          : isPaused
+          ? "Sync is currently paused."
+          : "Sync is active."
       )
-      .addToggle((toggle) => {
-        toggle
-          .setValue(this.plugin.settings.showSyncNotifications ?? false)
-          .onChange(async (val) => {
-            this.plugin.settings.showSyncNotifications = val;
-            await this.plugin.saveSettings();
+      .addButton((btn) => {
+        btn.setDisabled(!hasVault);
+        if (isPaused) {
+          btn
+            .setButtonText("Resume")
+            .setCta()
+            .onClick(async () => {
+              this.plugin.settings.isSyncPaused = false;
+              await this.plugin.saveSettings();
+              new Notice("Resumed sync.");
+              this.display();
+              this.plugin.syncRun("manual");
+            });
+        } else {
+          btn
+            .setButtonText("Pause")
+            .onClick(async () => {
+              this.plugin.settings.isSyncPaused = true;
+              await this.plugin.saveSettings();
+              new Notice("Paused sync.");
+              this.display();
+            });
+        }
+      })
+      .addButton((btn) => {
+        btn
+          .setButtonText("Sync now")
+          .setDisabled(!hasVault)
+          .onClick(async () => {
+            new Notice("Starting sync...");
+            await this.plugin.syncRun("manual");
+          });
+      })
+      .addButton((btn) => {
+        btn
+          .setButtonText("Dry run")
+          .setDisabled(!hasVault)
+          .onClick(async () => {
+            new Notice("Simulating sync...");
+            await this.plugin.syncRun("dry");
           });
       });
 
     new Setting(containerEl)
       .setName("Auto-sync interval")
-      .setDesc("Periodically sync notes in the background")
+      .setDesc("Frequency of background sync checks")
       .addDropdown((drop) => {
         drop
-          .addOption("-1", "Disabled")
+          .addOption("-1", "Manual only")
           .addOption("60000", "Every 1 minute")
           .addOption("300000", "Every 5 minutes")
           .addOption("900000", "Every 15 minutes")
@@ -1508,10 +1058,62 @@ export class CloudSyncSettingTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
-      .setName("Safety protection threshold")
-      .setDesc(
-        "Prevent accidental deletion if too many notes are deleted at once"
-      )
+      .setName("Sync on startup")
+      .setDesc("Run sync automatically when Obsidian launches")
+      .addToggle((toggle) => {
+        toggle
+          .setValue((this.plugin.settings.initRunAfterMilliseconds ?? -1) > 0)
+          .onChange(async (val) => {
+            this.plugin.settings.initRunAfterMilliseconds = val ? 2000 : -1;
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("Sync on file save")
+      .setDesc("Trigger sync shortly after making edits")
+      .addToggle((toggle) => {
+        toggle
+          .setValue((this.plugin.settings.syncOnSaveAfterMilliseconds ?? -1) > 0)
+          .onChange(async (val) => {
+            this.plugin.settings.syncOnSaveAfterMilliseconds = val ? 3000 : -1;
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("Show sync notifications")
+      .setDesc("Display brief status notices when files are synced")
+      .addToggle((toggle) => {
+        toggle
+          .setValue(this.plugin.settings.showSyncNotifications ?? false)
+          .onChange(async (val) => {
+            this.plugin.settings.showSyncNotifications = val;
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("Conflict resolution")
+      .setDesc("Strategy when notes are independently modified on multiple devices")
+      .addDropdown((drop) => {
+        drop
+          .addOption("keep_newer", "Keep newer version")
+          .addOption("keep_larger", "Keep larger version")
+          .setValue(
+            this.plugin.settings.conflictAction === "keep_larger"
+              ? "keep_larger"
+              : "keep_newer"
+          )
+          .onChange(async (val: any) => {
+            this.plugin.settings.conflictAction = val;
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("Deletion safety threshold")
+      .setDesc("Prevent syncing if too many files are deleted at once")
       .addDropdown((drop) => {
         drop
           .addOption("0", "Disabled")
@@ -1524,6 +1126,306 @@ export class CloudSyncSettingTab extends PluginSettingTab {
           .onChange(async (val) => {
             this.plugin.settings.safetyDeletionThreshold = Number.parseInt(val, 10);
             await this.plugin.saveSettings();
+          });
+      });
+
+    // 3. File Types & Filters
+    new Setting(containerEl)
+      .setName("File Inclusions & Filters")
+      .setHeading();
+
+    const ignoredFolders = this.plugin.settings.ignorePaths || [];
+    const excludedDescFrag = createFragment((f) => {
+      f.appendText("Paths that will be skipped during synchronization.");
+      if (ignoredFolders.length > 0) {
+        f.appendText(" Currently excluded:");
+        const ul = f.createEl("ul");
+        for (const folder of ignoredFolders) {
+          ul.createEl("li", { text: folder });
+        }
+      }
+    });
+
+    new Setting(containerEl)
+      .setName("Excluded folders")
+      .setDesc(excludedDescFrag)
+      .addButton((btn) => {
+        btn
+          .setButtonText("Manage exclusions")
+          .onClick(() => {
+            new ExcludedFoldersModal(this.app, this.plugin).open();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("Include image files")
+      .setDesc("Sync png, jpg, jpeg, gif, svg, webp, and bmp images")
+      .addToggle((toggle) => {
+        toggle
+          .setValue(this.plugin.settings.syncImages ?? true)
+          .onChange(async (val) => {
+            this.plugin.settings.syncImages = val;
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("Include audio files")
+      .setDesc("Sync mp3, wav, m4a, 3gp, flac, ogg, and opus audio")
+      .addToggle((toggle) => {
+        toggle
+          .setValue(this.plugin.settings.syncAudio ?? false)
+          .onChange(async (val) => {
+            this.plugin.settings.syncAudio = val;
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("Include video files")
+      .setDesc("Sync mp4, webm, mov, and mkv video recordings")
+      .addToggle((toggle) => {
+        toggle
+          .setValue(this.plugin.settings.syncVideos ?? false)
+          .onChange(async (val) => {
+            this.plugin.settings.syncVideos = val;
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("Include PDF documents")
+      .setDesc("Sync PDF document files")
+      .addToggle((toggle) => {
+        toggle
+          .setValue(this.plugin.settings.syncPdfs ?? true)
+          .onChange(async (val) => {
+            this.plugin.settings.syncPdfs = val;
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("Include other attachments")
+      .setDesc("Sync any other non-markdown attachment formats")
+      .addToggle((toggle) => {
+        toggle
+          .setValue(this.plugin.settings.syncUnsupported ?? false)
+          .onChange(async (val) => {
+            this.plugin.settings.syncUnsupported = val;
+            await this.plugin.saveSettings();
+          });
+      });
+
+    // 4. Device Configuration Backups
+    new Setting(containerEl)
+      .setName("Device Configuration Backups")
+      .setHeading();
+
+    initDeviceIdentity(this.plugin.settings);
+    new Setting(containerEl)
+      .setName("Device name")
+      .setDesc("Identifies this device in activity logs and configuration backups")
+      .addText((text) => {
+        text
+          .setPlaceholder(this.plugin.settings.deviceName || "My Device")
+          .setValue(this.plugin.settings.deviceName ?? "")
+          .onChange(async (val) => {
+            const name = val.trim() || "My Device";
+            this.plugin.settings.deviceName = name;
+            await this.plugin.saveSettings();
+            const { fsRemote } = this.plugin.getOrCreateClients();
+            if (
+              fsRemote &&
+              typeof (fsRemote as any).registerDevice === "function"
+            ) {
+              await (fsRemote as any).registerDevice({
+                deviceId: this.plugin.settings.deviceId!,
+                deviceName: this.plugin.settings.deviceName,
+                platform: Platform.isMobile ? "mobile" : "desktop",
+                lastBackup: this.plugin.settings.lastSettingsBackupTime,
+              });
+            }
+          });
+      });
+
+    const thisDeviceSetting = new Setting(containerEl)
+      .setName(`${this.plugin.settings.deviceName || "My Device"} (This device)`)
+      .setDesc(
+        this.plugin.settings.lastSettingsBackupTime
+          ? `Last backed up: ${new Date(
+              this.plugin.settings.lastSettingsBackupTime
+            ).toLocaleString()}`
+          : "Never backed up to cloud"
+      )
+      .addButton((btn) => {
+        btn
+          .setButtonText("Backup now")
+          .setCta()
+          .onClick(async () => {
+            btn.setDisabled(true);
+            btn.setButtonText("Backing up...");
+            const { fsEncrypt, fsRemote } = this.plugin.getOrCreateClients();
+            try {
+              const res = await backupDeviceSettings(
+                this.app,
+                fsEncrypt,
+                fsRemote as FakeFsWorker,
+                this.plugin.settings,
+                (msg) => {
+                  thisDeviceSetting.setDesc(msg);
+                }
+              );
+              await this.plugin.saveSettings();
+              thisDeviceSetting.setDesc(
+                `Last backed up: ${new Date(res.timestamp).toLocaleString()} (${
+                  res.fileCount
+                } files)`
+              );
+              new Notice(`Backed up ${res.fileCount} settings files.`);
+              btn.setButtonText("Backed up!");
+              window.setTimeout(() => {
+                btn.setDisabled(false);
+                btn.setButtonText("Backup now");
+              }, 2000);
+            } catch (err: any) {
+              btn.setDisabled(false);
+              btn.setButtonText("Backup now");
+              new Notice(`Failed to back up settings: ${err?.message || err}`);
+            }
+          });
+      });
+
+    const otherDevicesContainer = containerEl.createDiv();
+    new Setting(otherDevicesContainer)
+      .setName("Loading other devices...")
+      .setDesc("Fetching connected devices from cloud");
+
+    const { fsRemote, fsEncrypt } = this.plugin.getOrCreateClients();
+    if (fsRemote && typeof (fsRemote as any).getDevices === "function") {
+      const workerClient = fsRemote as FakeFsWorker;
+      this.plugin.autoRegisterDevice().catch(() => {});
+
+      const timeoutPromise = new Promise<DeviceInfo[]>((_, reject) =>
+        setTimeout(() => reject(new Error("Request timed out")), 8000)
+      );
+
+      Promise.race([workerClient.getDevices(), timeoutPromise])
+        .then((devices) => {
+          otherDevicesContainer.empty();
+          const other = devices.filter(
+            (d) => d.deviceId !== this.plugin.settings.deviceId
+          );
+          if (other.length === 0) {
+            new Setting(otherDevicesContainer)
+              .setName("No other device backups found")
+              .setDesc(
+                "Backups created on your other devices will appear here."
+              );
+            return;
+          }
+
+          for (const dev of other) {
+            const hasBackup = Boolean(dev.lastBackup);
+            const timeStr = dev.lastBackup
+              ? new Date(dev.lastBackup).toLocaleString()
+              : "Never";
+
+            new Setting(otherDevicesContainer)
+              .setName(dev.deviceName || "Unnamed Device")
+              .setDesc(
+                hasBackup
+                  ? `Last backup: ${timeStr} • ${dev.fileCount || 0} config files`
+                  : `Last active: ${new Date(dev.lastActive).toLocaleString()} • No backup`
+              )
+              .addButton((restoreBtn) => {
+                restoreBtn
+                  .setButtonText("Restore to this device")
+                  .setDisabled(!hasBackup)
+                  .onClick(async () => {
+                    if (
+                      !confirm(
+                        `Restore settings from "${dev.deviceName}" to this device?\n\nThis will update your local themes, snippets, and plugin configurations.`
+                      )
+                    ) {
+                      return;
+                    }
+                    restoreBtn.setDisabled(true);
+                    restoreBtn.setButtonText("Restoring...");
+                    try {
+                      const res = await restoreDeviceSettings(
+                        this.app,
+                        fsEncrypt,
+                        dev.deviceId,
+                        (msg) => new Notice(msg, 1500)
+                      );
+                      restoreBtn.setButtonText("Restored!");
+                      new Notice(
+                        `Restored ${res.restoredCount} configuration files. Reload Obsidian to apply changes.`,
+                        6000
+                      );
+                      window.setTimeout(() => {
+                        restoreBtn.setDisabled(false);
+                        restoreBtn.setButtonText("Restore to this device");
+                      }, 3000);
+                    } catch (err: any) {
+                      restoreBtn.setDisabled(false);
+                      restoreBtn.setButtonText("Restore to this device");
+                      new Notice(
+                        `Failed to restore settings: ${
+                          err?.message || err
+                        }`
+                      );
+                    }
+                  });
+              });
+          }
+        })
+        .catch((err) => {
+          console.error("CloudSync: Failed to load devices:", err);
+          otherDevicesContainer.empty();
+          new Setting(otherDevicesContainer)
+            .setName("Could not load other devices")
+            .setDesc("Check your network connection and click Refresh above.");
+        });
+    } else {
+      otherDevicesContainer.empty();
+      new Setting(otherDevicesContainer)
+        .setName("Other devices")
+        .setDesc("Device backups will be available once connected to CloudSync.");
+    }
+
+    // 5. History & Recovery Tools
+    new Setting(containerEl)
+      .setName("History & Recovery Tools")
+      .setHeading();
+
+    new Setting(containerEl)
+      .setName("Deleted files (Trash)")
+      .setDesc("Recover files deleted from your vault within the last 30 days")
+      .addButton((btn) => {
+        btn
+          .setButtonText("Browse trash")
+          .onClick(() => {
+            new DeletedFilesModal(this.app, this.plugin, false).open();
+          });
+      })
+      .addButton((btn) => {
+        btn
+          .setButtonText("Bulk restore")
+          .onClick(() => {
+            new DeletedFilesModal(this.app, this.plugin, true).open();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("Sync activity log")
+      .setDesc("Inspect detailed sync operations and network logs for troubleshooting")
+      .addButton((btn) => {
+        btn
+          .setButtonText("Open log")
+          .onClick(() => {
+            new SyncLogModal(this.app, this.plugin).open();
           });
       });
   }

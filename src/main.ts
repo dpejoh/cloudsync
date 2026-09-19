@@ -312,7 +312,7 @@ export default class CloudSyncPlugin extends Plugin {
           this.settings.isSyncPaused = !isPaused;
           await this.saveSettings();
           new Notice(
-            this.settings.isSyncPaused ? "CloudSync: Paused" : "CloudSync: Resumed"
+            this.settings.isSyncPaused ? "Sync paused" : "Sync resumed"
           );
           if (!this.settings.isSyncPaused) {
             this.syncRun("manual");
@@ -406,12 +406,12 @@ export default class CloudSyncPlugin extends Plugin {
     }
 
     if (!this.settings.cloudsync.token) {
-      new Notice("CloudSync: Please log in via settings to start syncing.");
+      new Notice("Please log in to start syncing.");
       return;
     }
 
     if (!this.settings.cloudsync.vaultId) {
-      new Notice("CloudSync: Please choose a remote vault in settings to start syncing.");
+      new Notice("Please choose a remote vault to start syncing.");
       return;
     }
 
@@ -431,7 +431,7 @@ export default class CloudSyncPlugin extends Plugin {
 
     const notifyFunc = async (s: SyncTriggerSourceType, step: number) => {
       if (s === "manual" && step === 0) {
-        new Notice("CloudSync: Starting sync...");
+        new Notice("Starting sync...");
       }
     };
 
@@ -440,7 +440,7 @@ export default class CloudSyncPlugin extends Plugin {
         type: "error",
         message: `Sync error: ${err?.message || err}`,
       });
-      new Notice(`CloudSync Error: ${err?.message || err}`);
+      new Notice(`Sync error: ${err?.message || err}`);
     };
 
     const ribboonFunc = async (s: SyncTriggerSourceType, step: number) => {
@@ -460,11 +460,11 @@ export default class CloudSyncPlugin extends Plugin {
     ) => {
       if (this.statusBarElement) {
         if (step === 1 || step === 2) {
-          this.statusBarElement.setText("CloudSync: Syncing...");
+          this.statusBarElement.setText("Syncing...");
         } else if (everythingOk) {
-          this.statusBarElement.setText("CloudSync: Synced");
+          this.statusBarElement.setText("Synced");
         } else {
-          this.statusBarElement.setText("CloudSync: Failed");
+          this.statusBarElement.setText("Sync failed");
         }
       }
     };
@@ -508,7 +508,7 @@ export default class CloudSyncPlugin extends Plugin {
 
     if (this.isSyncing || this.isFastSyncing) {
       if (triggerSource === "manual") {
-        new Notice("CloudSync is already running.");
+        new Notice("Sync is already running.");
       }
       return;
     }
@@ -576,7 +576,7 @@ export default class CloudSyncPlugin extends Plugin {
         type: "error",
         message: `Sync failed: ${err?.message || err}`,
       });
-      new Notice(`CloudSync failed: ${err?.message || err}`);
+      new Notice(`Sync failed: ${err?.message || err}`);
     } finally {
       if (this.cachedFsRemote?.latestRevision) {
         this.lastKnownRevision = Math.max(
@@ -646,20 +646,20 @@ export default class CloudSyncPlugin extends Plugin {
       } else {
         this.settings = Object.assign({}, this.settings, parsed.result);
         await this.saveSettings();
-        new Notice("CloudSync settings imported successfully.");
+        new Notice("Settings imported.");
       }
     });
 
     this.syncRibbon = this.addRibbonIcon(
       iconNameSyncWait,
-      "CloudSync: Sync Now",
+      "Sync vault",
       async () => this.syncRun("manual")
     );
 
     if (this.settings.enableStatusBarInfo) {
       const statusBarItem = this.addStatusBarItem();
       this.statusBarElement = statusBarItem.createEl("span");
-      this.statusBarElement.setText("CloudSync: Ready");
+      this.statusBarElement.setText("Ready");
       this.statusBarElement.addClass("mod-clickable");
       statusBarItem.addClass("mod-clickable");
       statusBarItem.addEventListener("click", (evt) => {
@@ -701,7 +701,7 @@ export default class CloudSyncPlugin extends Plugin {
     );
 
     this.addCommand({
-      id: "cloudsync-version-history",
+      id: "version-history",
       name: "Open version history for current file",
       icon: "lucide-history",
       checkCallback: (checking) => {
@@ -717,7 +717,7 @@ export default class CloudSyncPlugin extends Plugin {
     });
 
     this.addCommand({
-      id: "cloudsync-choose-vault",
+      id: "choose-vault",
       name: "Choose remote vault",
       icon: "lucide-folder-sync",
       callback: () => {
@@ -726,7 +726,7 @@ export default class CloudSyncPlugin extends Plugin {
     });
 
     this.addCommand({
-      id: "cloudsync-sync-now",
+      id: "sync-now",
       name: "Sync Vault Now",
       icon: iconNameSyncWait,
       callback: async () => {
@@ -735,7 +735,7 @@ export default class CloudSyncPlugin extends Plugin {
     });
 
     this.addCommand({
-      id: "cloudsync-dry-run",
+      id: "dry-run",
       name: "Dry Run (Preview Changes)",
       icon: iconNameSyncWait,
       callback: async () => {
@@ -744,31 +744,31 @@ export default class CloudSyncPlugin extends Plugin {
     });
 
     this.addCommand({
-      id: "cloudsync-backup-device-settings",
+      id: "backup-device-settings",
       name: "Backup Settings for This Device to Cloud",
       callback: async () => {
         const { fsEncrypt, fsRemote } = this.getOrCreateClients();
-        const notice = new Notice("CloudSync: Backing up device settings...", 0);
+        const notice = new Notice("Backing up device settings...", 0);
         try {
           const res = await backupDeviceSettings(
             this.app,
             fsEncrypt,
             fsRemote as FakeFsWorker,
             this.settings,
-            (msg) => notice.setMessage(`CloudSync: ${msg}`)
+            (msg) => notice.setMessage(msg)
           );
           await this.saveSettings();
           notice.hide();
-          new Notice(`CloudSync: Backed up ${res.fileCount} settings files to cloud.`);
+          new Notice(`Backed up ${res.fileCount} settings files.`);
         } catch (err: any) {
           notice.hide();
-          new Notice(`CloudSync: Failed to backup settings: ${err?.message || err}`);
+          new Notice(`Failed to back up settings: ${err?.message || err}`);
         }
       },
     });
 
     this.addCommand({
-      id: "cloudsync-deleted-files",
+      id: "deleted-files",
       name: "Open Cloud Trash (Restore Deleted Files)",
       icon: "lucide-trash-2",
       callback: () => {
@@ -777,7 +777,7 @@ export default class CloudSyncPlugin extends Plugin {
     });
 
     this.addCommand({
-      id: "cloudsync-sync-log",
+      id: "sync-log",
       name: "Open Sync Activity Log",
       icon: "lucide-align-left",
       callback: () => {
@@ -1040,7 +1040,7 @@ export default class CloudSyncPlugin extends Plugin {
 
     try {
       if (this.statusBarElement) {
-        this.statusBarElement.setText("CloudSync: Pulling...");
+        this.statusBarElement.setText("Pulling...");
       }
 
       let pulled = 0;
@@ -1078,7 +1078,7 @@ export default class CloudSyncPlugin extends Plugin {
       }
 
       if (this.statusBarElement) {
-        this.statusBarElement.setText("CloudSync: Synced");
+        this.statusBarElement.setText("Synced");
       }
       if (pulled > 0 || deleted > 0) {
         this.addSyncLog({
@@ -1086,7 +1086,7 @@ export default class CloudSyncPlugin extends Plugin {
           message: `Live sync: ${pulled} updated, ${deleted} deleted`,
         });
         if (this.settings.showSyncNotifications) {
-          new Notice(`CloudSync: Synced (${pulled} updated, ${deleted} deleted)`, 2000);
+          new Notice(`Synced: ${pulled} updated, ${deleted} deleted`, 2000);
         }
       }
     } catch (err: any) {
@@ -1168,7 +1168,7 @@ export default class CloudSyncPlugin extends Plugin {
 
     try {
       if (this.statusBarElement) {
-        this.statusBarElement.setText("CloudSync: Syncing...");
+        this.statusBarElement.setText("Syncing...");
       }
 
       const failedPaths: string[] = [];
@@ -1220,7 +1220,7 @@ export default class CloudSyncPlugin extends Plugin {
 
       if (this.statusBarElement) {
         this.statusBarElement.setText(
-          failedPaths.length > 0 ? "CloudSync: Retry queued" : "CloudSync: Synced"
+          failedPaths.length > 0 ? "Retry queued" : "Synced"
         );
       }
     } catch (err: any) {
@@ -1375,7 +1375,7 @@ export default class CloudSyncPlugin extends Plugin {
   ) {
     this.currSyncMsg = `Syncing (${counter}/${total}): ${path}`;
     if (this.statusBarElement) {
-      this.statusBarElement.setText(`CloudSync: ${counter}/${total}`);
+      this.statusBarElement.setText(`${counter}/${total}`);
     }
   }
 }
