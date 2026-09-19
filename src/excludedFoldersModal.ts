@@ -33,7 +33,7 @@ export class ExcludedFoldersModal extends Modal {
     });
 
     const listContainer = contentEl.createDiv({
-      cls: "cloudsync-excluded-list-container",
+      cls: "excluded-folders-list",
     });
 
     const ignored = this.plugin.settings.ignorePaths || [];
@@ -45,8 +45,8 @@ export class ExcludedFoldersModal extends Modal {
     } else {
       for (let i = 0; i < ignored.length; i++) {
         const folder = ignored[i];
-        const row = listContainer.createDiv({ cls: "cloudsync-share-user-row" });
-        row.createSpan({ text: folder, cls: "cloudsync-share-username" });
+        const row = listContainer.createDiv({ cls: "share-user-row" });
+        row.createSpan({ text: folder, cls: "share-username" });
         const removeBtn = row.createEl("button", {
           cls: "mod-destructive",
           text: "Remove",

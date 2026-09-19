@@ -20,13 +20,13 @@ export function createOtpInput(
   options: OtpInputOptions = {}
 ): OtpInputHandle {
   const length = options.length ?? 6;
-  const container = parentEl.createDiv({ cls: "cloudsync-otp-squares-container" });
+  const container = parentEl.createDiv({ cls: "otp-container" });
   const inputs: HTMLInputElement[] = [];
 
   for (let i = 0; i < length; i++) {
     const input = container.createEl("input", {
       type: "text",
-      cls: "cloudsync-otp-square",
+      cls: "otp-square",
       attr: {
         maxlength: "1",
         inputmode: "numeric",

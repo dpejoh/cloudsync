@@ -73,7 +73,7 @@ export class VaultShareModal extends Modal {
       });
 
       if (res.status === 200) {
-        new Notice(`Shared "${this.vaultName}" with ${username}!`);
+        new Notice(`Shared "${this.vaultName}" with ${username}.`);
         this.inviteUsername = "";
         await this.fetchShares();
         this.render();
@@ -126,7 +126,7 @@ export class VaultShareModal extends Modal {
     });
 
     if (this.errorMessage) {
-      const errBox = contentEl.createDiv({ cls: "cloudsync-error-banner" });
+      const errBox = contentEl.createDiv({ cls: "error-banner" });
       errBox.setText(this.errorMessage);
     }
 
@@ -147,19 +147,18 @@ export class VaultShareModal extends Modal {
     } else {
       for (const user of this.shares) {
         const userRow = sharesContainerEl.createDiv({
-          cls: "cloudsync-share-user-row",
+          cls: "share-user-row",
         });
-        userRow.createSpan({ text: user, cls: "cloudsync-share-username" });
+        userRow.createSpan({ text: user, cls: "share-username" });
         const removeBtn = userRow.createEl("button", {
-          cls: "cloudsync-share-remove-btn mod-destructive",
+          cls: "share-remove-btn mod-destructive",
           text: "Remove",
         });
         removeBtn.onclick = () => this.removeShare(user);
       }
     }
 
-    // Invite user input row
-    const inviteSetting = new Setting(contentEl)
+        const inviteSetting = new Setting(contentEl)
       .setName("Invite user")
       .addText((text) => {
         text
@@ -180,8 +179,7 @@ export class VaultShareModal extends Modal {
           .onClick(() => this.inviteUser());
       });
 
-    // Done button at bottom right
-    const footer = contentEl.createDiv({ cls: "modal-button-container" });
+        const footer = contentEl.createDiv({ cls: "modal-button-container" });
     footer.createEl("button", { text: "Done" }, (btn) => {
       btn.onclick = () => this.close();
     });
