@@ -560,6 +560,178 @@ input[type="text"].otp-square.is-filled {
 }
 
 
+/* Vault sharing */
+.vault-shares-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 12px 0 16px 0;
+  max-height: 240px;
+  min-height: 48px;
+  overflow-y: auto;
+  flex-shrink: 0;
+}
+
+.empty-shares-notice {
+  padding: 16px;
+  text-align: center;
+  color: var(--text-muted);
+  background: var(--background-secondary);
+  border-radius: var(--radius-m, 6px);
+  font-size: 13px;
+}
+
+.share-user-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m, 6px);
+  gap: 12px;
+}
+
+.share-user-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1;
+}
+
+.share-user-avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--interactive-accent);
+  color: var(--text-on-accent, #ffffff);
+  font-size: 13px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  text-transform: uppercase;
+  user-select: none;
+}
+
+.share-username {
+  font-weight: 500;
+  color: var(--text-normal);
+  word-break: break-all;
+}
+
+.share-remove-btn {
+  flex-shrink: 0;
+}
+
+.invite-section {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.invite-section-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-normal);
+  margin-bottom: 8px;
+}
+
+.invite-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.invite-input {
+  flex: 1;
+}
+
+.invite-btn {
+  flex-shrink: 0;
+}
+
+/* Mobile & Phone View - FULLY rounded capsule for collaborator card */
+.is-phone .vault-shares-list .share-user-row,
+.is-mobile .vault-shares-list .share-user-row,
+.is-phone .share-user-row,
+.is-mobile .share-user-row,
+.share-user-row.is-fully-rounded {
+  border-radius: 9999px;
+  padding: 6px 8px 6px 14px;
+  min-height: 48px;
+}
+
+.is-phone .vault-shares-list .share-remove-btn,
+.is-mobile .vault-shares-list .share-remove-btn {
+  border-radius: var(--radius-pill, 9999px);
+  padding: 6px 14px;
+}
+
+.is-phone .vault-share-modal .invite-input,
+.is-mobile .vault-share-modal .invite-input {
+  border-radius: var(--radius-pill, 9999px);
+  padding: 8px 16px;
+  height: 42px;
+}
+
+.is-phone .vault-share-modal .invite-btn,
+.is-mobile .vault-share-modal .invite-btn {
+  border-radius: var(--radius-pill, 9999px);
+  padding: 8px 20px;
+  height: 42px;
+}
+
+.is-phone .vault-shares-list .empty-shares-notice,
+.is-mobile .vault-shares-list .empty-shares-notice {
+  border-radius: var(--radius-pill, 9999px);
+  padding: 12px 18px;
+}
+
+.is-phone .vault-share-modal .modal-button-container button,
+.is-mobile .vault-share-modal .modal-button-container button {
+  border-radius: var(--radius-pill, 9999px);
+}
+
+@media (max-width: 600px) {
+  .vault-shares-list .share-user-row,
+  .share-user-row,
+  .share-user-row.is-fully-rounded {
+    border-radius: 9999px;
+    padding: 6px 8px 6px 14px;
+    min-height: 48px;
+  }
+
+  .vault-shares-list .share-remove-btn {
+    border-radius: var(--radius-pill, 9999px);
+    padding: 6px 14px;
+  }
+
+  .vault-share-modal .invite-input {
+    border-radius: 16px;
+    padding: 8px 16px;
+    height: 42px;
+  }
+
+  .vault-share-modal .invite-btn {
+    border-radius: var(--radius-pill, 9999px);
+    padding: 8px 20px;
+    height: 42px;
+  }
+
+  .vault-shares-list .empty-shares-notice {
+    border-radius: 16px;
+    padding: 12px 18px;
+  }
+
+  .vault-share-modal .modal-button-container button {
+    border-radius: var(--radius-pill, 9999px);
+  }
+}
+
+
 /* Version history modal */
 .history-modal .modal-content {
   display: flex;

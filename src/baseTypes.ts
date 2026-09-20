@@ -10,6 +10,7 @@ export interface CloudSyncConfig {
   email?: string; // backwards compatibility
   token: string;
   vaultId: string;
+  vaultOwner?: string;
   userId: string;
   mode?: "single" | "multi";
   has2FA?: boolean;
@@ -26,6 +27,7 @@ export const DEFAULT_CLOUDSYNC_CONFIG: CloudSyncConfig = {
   email: "",
   token: "",
   vaultId: "",
+  vaultOwner: "",
   userId: "",
   mode: "multi",
   encryptionKey: "",

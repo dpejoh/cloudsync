@@ -933,10 +933,19 @@ export class CloudSyncSettingTab extends PluginSettingTab {
       .setName("Remote Vault & Sync Controls")
       .setHeading();
 
+    const isSharedVault = !!(
+      cs.vaultOwner &&
+      cs.vaultOwner.toLowerCase() !== (cs.username || "").toLowerCase()
+    );
+
     if (cs.vaultId) {
-      new Setting(containerEl)
+      const vaultSetting = new Setting(containerEl)
         .setName("Connected remote vault")
-        .setDesc(`Currently syncing with remote vault "${cs.vaultId}".`)
+        .setDesc(
+          isSharedVault
+            ? `Currently syncing with shared vault "${cs.vaultId}" (owned by ${cs.vaultOwner}).`
+            : `Currently syncing with remote vault "${cs.vaultId}".`
+        )
         .addButton((btn) => {
           btn
             .setButtonText("Disconnect")
@@ -951,6 +960,7 @@ export class CloudSyncSettingTab extends PluginSettingTab {
               }
               const disconnectedVault = cs.vaultId;
               cs.vaultId = "";
+              cs.vaultOwner = "";
               await this.plugin.saveSettings();
               new Notice(`Disconnected from remote vault "${disconnectedVault}".`);
               this.display();
@@ -962,14 +972,35 @@ export class CloudSyncSettingTab extends PluginSettingTab {
             .onClick(() => {
               new VaultPickerModal(this.app, this.plugin, () => this.display()).open();
             });
-        })
-        .addButton((btn) => {
+        });
+
+      if (!isSharedVault) {
+        vaultSetting.addButton((btn) => {
           btn
             .setButtonText("Collaborators")
             .onClick(() => {
               new VaultShareModal(this.app, this.plugin, cs.vaultId).open();
             });
         });
+      }
+
+      if (isSharedVault) {
+        new Setting(containerEl)
+          .setName("Shared vault encryption password")
+          .setDesc(
+            `If the owner encrypted this vault, enter the shared password to decrypt files. Leave empty if unencrypted.`
+          )
+          .addText((text) => {
+            text
+              .setPlaceholder("Enter shared vault password")
+              .setValue(this.plugin.settings.password || "")
+              .onChange(async (val) => {
+                this.plugin.settings.password = val.trim();
+                cs.encryptionKey = val.trim();
+                await this.plugin.saveSettings();
+              });
+          });
+      }
     } else {
       new Setting(containerEl)
         .setName("Connected remote vault")
