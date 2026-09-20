@@ -293,7 +293,122 @@ async function runTests() {
   }
   console.log("[18/18] GET /api/vaults (absent check) -> ok");
 
-  console.log("\nall 18 vps endpoint tests passed");
+  // Multi-user collaboration tests
+  // 19. Alice creates a collaboration vault
+  const createCollabRes = await fetch(`${BASE_URL}/api/vaults`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ name: "collab-vault" }),
+  });
+  const createCollabJson = await createCollabRes.json();
+  if (!createCollabJson.ok) throw new Error("Failed to create collab vault");
+  console.log("[19/25] POST /api/vaults (collab-vault) -> ok");
+
+  // 20. Bob registers
+  const bobVerifier = "b".repeat(64);
+  const bobRegRes = await fetch(`${BASE_URL}/api/auth/register`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username: "bob", verifier: bobVerifier }),
+  });
+  const bobRegJson = await bobRegRes.json();
+  if (!bobRegJson.ok || !bobRegJson.token) throw new Error("Failed to register Bob");
+  const bobToken = bobRegJson.token;
+  console.log("[20/25] POST /api/auth/register (user: bob) -> ok");
+
+  // 21. Alice invites Bob to collab-vault
+  const inviteRes = await fetch(`${BASE_URL}/api/sync/shares?vault=collab-vault`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ inviteUsername: "bob" }),
+  });
+  const inviteJson = await inviteRes.json();
+  if (!inviteJson.ok || !inviteJson.shares.includes("bob")) {
+    throw new Error(`Invite failed: ${JSON.stringify(inviteJson)}`);
+  }
+  console.log("[21/25] POST /api/sync/shares (invite bob) -> ok");
+
+  // 22. Bob lists vaults, sees collab-vault as shared
+  const bobVaultsRes = await fetch(`${BASE_URL}/api/vaults`, {
+    headers: { Authorization: `Bearer ${bobToken}` },
+  });
+  const bobVaultsJson = await bobVaultsRes.json();
+  const sharedVault = bobVaultsJson.vaults.find((v) => v.name === "collab-vault");
+  if (!sharedVault || !sharedVault.isShared || sharedVault.owner !== "alice") {
+    throw new Error(`Bob did not find shared vault: ${JSON.stringify(bobVaultsJson)}`);
+  }
+  console.log("[22/25] GET /api/vaults (Bob sees shared vault from Alice) -> ok");
+
+  // 23. Bob uploads a note to Alice's shared vault
+  const bobPutRes = await fetch(
+    `${BASE_URL}/api/sync/file?vault=collab-vault&owner=alice&key=Team/BobNote.md`,
+    {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${bobToken}`,
+        "Content-Type": "text/markdown",
+      },
+      body: "# Collaboration Note\nWritten by Bob.",
+    }
+  );
+  const bobPutJson = await bobPutRes.json();
+  if (!bobPutJson.ok) throw new Error(`Bob put failed: ${JSON.stringify(bobPutJson)}`);
+
+  // Alice reads Bob's note from her vault
+  const aliceGetRes = await fetch(
+    `${BASE_URL}/api/sync/file?vault=collab-vault&key=Team/BobNote.md`,
+    {
+      headers: { Authorization: `Bearer ${token}` },
+    }
+  );
+  if (aliceGetRes.status !== 200) {
+    throw new Error(`Alice cannot read Bob's note: ${aliceGetRes.status}`);
+  }
+  const noteContent = await aliceGetRes.text();
+  if (!noteContent.includes("Written by Bob")) {
+    throw new Error(`Unexpected note content: ${noteContent}`);
+  }
+  console.log("[23/25] PUT & GET /api/sync/file (Bob writes, Alice reads) -> ok");
+
+  // 24. Alice revokes Bob's access
+  const removeRes = await fetch(
+    `${BASE_URL}/api/sync/shares?vault=collab-vault&username=bob`,
+    {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${token}` },
+    }
+  );
+  const removeJson = await removeRes.json();
+  if (!removeJson.ok || removeJson.shares.includes("bob")) {
+    throw new Error("Failed to remove Bob from shares");
+  }
+  console.log("[24/25] DELETE /api/sync/shares (revoke bob) -> ok");
+
+  // 25. Bob attempts to access collab-vault, receives 403 Forbidden
+  const bobForbiddenRes = await fetch(
+    `${BASE_URL}/api/sync/file?vault=collab-vault&owner=alice&key=Team/BobNote.md`,
+    {
+      headers: { Authorization: `Bearer ${bobToken}` },
+    }
+  );
+  if (bobForbiddenRes.status !== 403) {
+    throw new Error(`Expected 403 Forbidden for revoked user, got: ${bobForbiddenRes.status}`);
+  }
+  console.log("[25/25] GET /api/sync/file (revoked user gets 403 Forbidden) -> ok");
+
+  // Clean up collab-vault
+  await fetch(`${BASE_URL}/api/vaults/collab-vault`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+
+  console.log("\nall 25 vps endpoint tests passed");
 }
 
 runTests()

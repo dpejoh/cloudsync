@@ -4,6 +4,9 @@ import type CloudSyncPlugin from "./main";
 interface RemoteVaultItem {
   name: string;
   revision?: number;
+  isShared?: boolean;
+  owner?: string;
+  ownerId?: string;
 }
 
 export class VaultPickerModal extends Modal {
@@ -127,11 +130,21 @@ export class VaultPickerModal extends Modal {
     });
 
     for (const v of this.vaults) {
-      const isConnected = currentVaultId === v.name;
+      const isCurrentOwner = v.isShared
+        ? cs.vaultOwner?.toLowerCase() === (v.owner || "").toLowerCase()
+        : !cs.vaultOwner ||
+          cs.vaultOwner.toLowerCase() === (cs.username || "").toLowerCase();
+      const isConnected = currentVaultId === v.name && isCurrentOwner;
       const setting = new Setting(listContainer);
 
       const nameFrag = createFragment((f) => {
         f.createSpan({ text: v.name, cls: "vault-name" });
+        if (v.isShared) {
+          f.createSpan({
+            text: ` (Shared by ${v.owner})`,
+            cls: "badge-shared",
+          });
+        }
         if (isConnected) {
           f.createSpan({
             text: " Connected",
@@ -144,6 +157,8 @@ export class VaultPickerModal extends Modal {
       setting.setDesc(
         isConnected
           ? "This local device is currently syncing with this remote vault."
+          : v.isShared
+          ? `Shared with you by ${v.owner}.`
           : v.revision
           ? `Revision: ${v.revision}`
           : "Available in your cloud account"
@@ -164,6 +179,7 @@ export class VaultPickerModal extends Modal {
               }
 
               cs.vaultId = "";
+              cs.vaultOwner = "";
               await this.plugin.saveSettings();
               new Notice(`Disconnected from remote vault "${v.name}".`);
               this.onVaultChanged?.("");
@@ -176,26 +192,31 @@ export class VaultPickerModal extends Modal {
             .setButtonText("Connect")
             .setCta()
             .onClick(async () => {
-              await this.handleConnectVault(v.name);
+              await this.handleConnectVault(
+                v.name,
+                v.isShared ? v.owner : undefined
+              );
             });
         });
 
-        setting.addExtraButton((btn) => {
-          btn
-            .setIcon("lucide-trash-2")
-            .setTooltip(`Delete remote vault "${v.name}" from cloud`)
-            .onClick(async () => {
-              if (
-                !confirm(
-                  `Are you sure you want to delete the remote vault "${v.name}" from the cloud?\n\nWARNING: All remote files, versions, and trash for this vault will be permanently deleted! Your local notes will remain untouched.`
-                )
-              ) {
-                return;
-              }
+        if (!v.isShared) {
+          setting.addExtraButton((btn) => {
+            btn
+              .setIcon("lucide-trash-2")
+              .setTooltip(`Delete remote vault "${v.name}" from cloud`)
+              .onClick(async () => {
+                if (
+                  !confirm(
+                    `Are you sure you want to delete the remote vault "${v.name}" from the cloud?\n\nWARNING: All remote files, versions, and trash for this vault will be permanently deleted! Your local notes will remain untouched.`
+                  )
+                ) {
+                  return;
+                }
 
-              await this.handleDeleteVault(v.name);
-            });
-        });
+                await this.handleDeleteVault(v.name);
+              });
+          });
+        }
       }
     }
   }
@@ -233,18 +254,37 @@ export class VaultPickerModal extends Modal {
     }
   }
 
-  private async handleConnectVault(vaultName: string) {
+  private async handleConnectVault(vaultName: string, vaultOwner?: string) {
     const cs = this.plugin.settings.cloudsync;
     cs.vaultId = vaultName;
 
-        this.plugin.lastKnownRevision = 0;
+    if (
+      vaultOwner &&
+      vaultOwner.toLowerCase() !== (cs.username || "").toLowerCase()
+    ) {
+      cs.vaultOwner = vaultOwner;
+      const sharedPassword = window.prompt(
+        `Connecting to shared vault "${vaultName}" (owned by ${vaultOwner}).\n\nIf this vault is end-to-end encrypted, enter the vault password provided by the owner (leave empty if unencrypted):`
+      );
+      if (sharedPassword !== null) {
+        const clean = sharedPassword.trim();
+        if (clean) {
+          this.plugin.settings.password = clean;
+          cs.encryptionKey = clean;
+        }
+      }
+    } else {
+      cs.vaultOwner = cs.username || "";
+    }
+
+    this.plugin.lastKnownRevision = 0;
     await this.plugin.saveSettings();
 
     new Notice(`Connected to remote vault "${vaultName}".`);
     this.onVaultChanged?.(vaultName);
     this.close();
 
-        window.setTimeout(() => {
+    window.setTimeout(() => {
       this.plugin.syncRun("manual");
     }, 300);
   }

@@ -380,6 +380,95 @@ async function recordVaultChange(
   return rev;
 }
 
+export interface VaultTarget {
+  ownerId: string;
+  vault: string;
+  isOwner: boolean;
+  ownerUsername: string;
+}
+
+async function resolveVaultTarget(
+  c: any,
+  vaultName: string,
+  requestedOwner?: string
+): Promise<{ target?: VaultTarget; error?: string; status?: number }> {
+  if (!isValidVaultName(vaultName)) {
+    return { error: "Invalid vault identifier.", status: 400 };
+  }
+
+  const callerId = c.get("userId");
+  const callerUsername = (c.get("username") || "").toLowerCase();
+
+  // If requestedOwner is provided and not caller:
+  if (requestedOwner && requestedOwner.trim().toLowerCase() !== callerUsername) {
+    const ownerNameNorm = requestedOwner.trim().toLowerCase();
+    const ownerUserRaw = await getStoredData(c, `user:${ownerNameNorm}`);
+    if (!ownerUserRaw) {
+      return { error: `Vault owner "${requestedOwner}" not found.`, status: 404 };
+    }
+    let ownerUser: any = null;
+    try {
+      ownerUser = JSON.parse(ownerUserRaw);
+    } catch {}
+    if (!ownerUser || !ownerUser.id) {
+      return { error: `Vault owner "${requestedOwner}" not found.`, status: 404 };
+    }
+
+    const sharesRaw = await getStoredData(c, `vault_shares:${ownerUser.id}:${vaultName}`);
+    const shares: string[] = sharesRaw ? JSON.parse(sharesRaw) : [];
+    const isShared = shares.some((u) => u.toLowerCase() === callerUsername);
+    if (!isShared) {
+      return { error: "You do not have access to this shared vault.", status: 403 };
+    }
+
+    return {
+      target: {
+        ownerId: ownerUser.id,
+        vault: vaultName,
+        isOwner: false,
+        ownerUsername: ownerUser.username,
+      },
+    };
+  }
+
+  // If requestedOwner is not provided, check if this vault is a shared vault for the caller
+  if (!requestedOwner) {
+    try {
+      const owned = await c.env.CLOUDSYNC_BUCKET.head(`users/${callerId}/vaults/${vaultName}/.cloudsync`);
+      if (!owned) {
+        const sharedRaw = await getStoredData(c, `user_shared_vaults:${callerId}`);
+        if (sharedRaw) {
+          const sharedList: Array<{ vault: string; ownerId: string; ownerUsername: string }> = JSON.parse(sharedRaw);
+          const match = sharedList.find((s) => s.vault.toLowerCase() === vaultName.toLowerCase());
+          if (match) {
+            const sharesRaw = await getStoredData(c, `vault_shares:${match.ownerId}:${match.vault}`);
+            const shares: string[] = sharesRaw ? JSON.parse(sharesRaw) : [];
+            if (shares.some((u) => u.toLowerCase() === callerUsername)) {
+              return {
+                target: {
+                  ownerId: match.ownerId,
+                  vault: match.vault,
+                  isOwner: false,
+                  ownerUsername: match.ownerUsername,
+                },
+              };
+            }
+          }
+        }
+      }
+    } catch {}
+  }
+
+  return {
+    target: {
+      ownerId: callerId,
+      vault: vaultName,
+      isOwner: true,
+      ownerUsername: callerUsername,
+    },
+  };
+}
+
 // Info & health
 app.get("/", (c) => {
   return c.json({
@@ -784,6 +873,7 @@ app.post("/api/user/change-password", async (c) => {
 // Vault management
 app.get("/api/vaults", async (c) => {
   const userId = c.get("userId");
+  const currentUsername = c.get("username") || "";
   const vaultNamesSet = new Set<string>();
 
   try {
@@ -801,7 +891,7 @@ app.get("/api/vaults", async (c) => {
     console.error("Failed to list vault prefixes:", err);
   }
 
-  const vaults = await Promise.all(
+  const ownedVaults = await Promise.all(
     Array.from(vaultNamesSet).map(async (name) => {
       let revision = 0;
       try {
@@ -811,11 +901,42 @@ app.get("/api/vaults", async (c) => {
           if (meta?.revision) revision = meta.revision;
         }
       } catch {}
-      return { name, revision };
+      return { name, revision, isShared: false, owner: currentUsername };
     })
   );
 
-  return c.json({ ok: true, vaults });
+  const sharedVaults: any[] = [];
+  try {
+    const sharedRaw = await getStoredData(c, `user_shared_vaults:${userId}`);
+    if (sharedRaw) {
+      const sharedList: Array<{ vault: string; ownerId: string; ownerUsername: string }> = JSON.parse(sharedRaw);
+      for (const item of sharedList) {
+        const sharesRaw = await getStoredData(c, `vault_shares:${item.ownerId}:${item.vault}`);
+        const shares: string[] = sharesRaw ? JSON.parse(sharesRaw) : [];
+        if (shares.some((u) => u.toLowerCase() === currentUsername.toLowerCase())) {
+          let revision = 0;
+          try {
+            const metaObj = await c.env.CLOUDSYNC_BUCKET.get(`users/${item.ownerId}/vaults/${item.vault}/.cloudsync_meta.json`);
+            if (metaObj) {
+              const meta = (await metaObj.json()) as any;
+              if (meta?.revision) revision = meta.revision;
+            }
+          } catch {}
+          sharedVaults.push({
+            name: item.vault,
+            revision,
+            isShared: true,
+            owner: item.ownerUsername,
+            ownerId: item.ownerId,
+          });
+        }
+      }
+    }
+  } catch (err) {
+    console.error("Failed to list shared vaults:", err);
+  }
+
+  return c.json({ ok: true, vaults: [...ownedVaults, ...sharedVaults] });
 });
 
 app.post("/api/vaults", async (c) => {
@@ -854,6 +975,35 @@ app.delete("/api/vaults/:vaultName", async (c) => {
     return c.json({ error: "Invalid vault identifier." }, 400);
   }
 
+  // Clean up collaborator reverse indices
+  try {
+    const sharesKey = `vault_shares:${userId}:${vaultName}`;
+    const rawShares = await getStoredData(c, sharesKey);
+    if (rawShares) {
+      const shares: string[] = JSON.parse(rawShares);
+      for (const username of shares) {
+        const uRaw = await getStoredData(c, `user:${username.toLowerCase()}`);
+        if (uRaw) {
+          const u = JSON.parse(uRaw);
+          const inviteeSharesKey = `user_shared_vaults:${u.id}`;
+          const inviteeRaw = await getStoredData(c, inviteeSharesKey);
+          if (inviteeRaw) {
+            let list: any[] = JSON.parse(inviteeRaw);
+            list = list.filter((s) => !(s.vault === vaultName && s.ownerId === userId));
+            await putStoredData(c, inviteeSharesKey, JSON.stringify(list));
+          }
+        }
+      }
+      await deleteStoredData(c, sharesKey);
+    }
+  } catch (err) {
+    console.error("Failed to clean up vault shares on delete:", err);
+  }
+
+  try {
+    await deleteStoredData(c, `vault_devices:${userId}:${vaultName}`);
+  } catch {}
+
   const prefixes = [
     `users/${userId}/vaults/${vaultName}/`,
     `users/${userId}/history/${vaultName}/`,
@@ -880,11 +1030,13 @@ app.delete("/api/vaults/:vaultName", async (c) => {
 
 // File sync endpoints
 app.get("/api/sync/walk", async (c) => {
-  const userId = c.get("userId");
   const vault = c.req.query("vault") || "default";
-  if (!isValidVaultName(vault)) return c.json({ error: "Invalid vault." }, 400);
+  const owner = c.req.query("owner");
+  const res = await resolveVaultTarget(c, vault, owner);
+  if (res.error || !res.target) return c.json({ error: res.error }, (res.status || 400) as any);
+  const { ownerId, vault: targetVault } = res.target;
 
-  const prefix = `users/${userId}/vaults/${vault}/`;
+  const prefix = `users/${ownerId}/vaults/${targetVault}/`;
   const files: any[] = [];
   let cursor: string | undefined = undefined;
   let truncated = true;
@@ -915,7 +1067,7 @@ app.get("/api/sync/walk", async (c) => {
 
   let latestRev = 0;
   try {
-    const metaObj = await c.env.CLOUDSYNC_BUCKET.get(`users/${userId}/vaults/${vault}/.cloudsync_meta.json`);
+    const metaObj = await c.env.CLOUDSYNC_BUCKET.get(`users/${ownerId}/vaults/${targetVault}/.cloudsync_meta.json`);
     if (metaObj) {
       const meta = (await metaObj.json()) as any;
       if (meta?.revision) latestRev = meta.revision;
@@ -926,18 +1078,20 @@ app.get("/api/sync/walk", async (c) => {
 });
 
 app.get("/api/sync/changes", async (c) => {
-  const userId = c.get("userId");
   const vault = c.req.query("vault") || "default";
-  if (!isValidVaultName(vault)) return c.json({ error: "Invalid vault." }, 400);
+  const owner = c.req.query("owner");
+  const res = await resolveVaultTarget(c, vault, owner);
+  if (res.error || !res.target) return c.json({ error: res.error }, (res.status || 400) as any);
+  const { ownerId, vault: targetVault } = res.target;
 
   const since = Number.parseInt(c.req.query("since") || "0", 10);
-  const vaultKey = `${userId}:${vault}`;
+  const vaultKey = `${ownerId}:${targetVault}`;
 
   let latestRev = 0;
   let allChanges: VaultChange[] = [];
 
   try {
-    const metaObj = await c.env.CLOUDSYNC_BUCKET.get(`users/${userId}/vaults/${vault}/.cloudsync_meta.json`);
+    const metaObj = await c.env.CLOUDSYNC_BUCKET.get(`users/${ownerId}/vaults/${targetVault}/.cloudsync_meta.json`);
     if (metaObj) {
       const meta = (await metaObj.json()) as any;
       latestRev = meta?.revision || 0;
@@ -979,15 +1133,16 @@ app.get("/api/sync/changes", async (c) => {
 });
 
 app.get("/api/sync/file", async (c) => {
-  const userId = c.get("userId");
   const vault = c.req.query("vault") || "default";
+  const owner = c.req.query("owner");
   const key = c.req.query("key") || "";
 
-  if (!isValidVaultName(vault) || !isValidFileKey(key)) {
-    return c.text("Invalid parameters", 400);
-  }
+  const res = await resolveVaultTarget(c, vault, owner);
+  if (res.error || !res.target) return c.text(res.error || "Invalid parameters", (res.status || 400) as any);
+  if (!isValidFileKey(key)) return c.text("Invalid parameters", 400);
+  const { ownerId, vault: targetVault } = res.target;
 
-  const obj = await c.env.CLOUDSYNC_BUCKET.get(`users/${userId}/vaults/${vault}/${key}`);
+  const obj = await c.env.CLOUDSYNC_BUCKET.get(`users/${ownerId}/vaults/${targetVault}/${key}`);
   if (!obj) return c.text("File not found", 404);
 
   const headers = new Headers();
@@ -1001,15 +1156,16 @@ app.get("/api/sync/file", async (c) => {
 });
 
 app.on("HEAD", "/api/sync/file", async (c) => {
-  const userId = c.get("userId");
   const vault = c.req.query("vault") || "default";
+  const owner = c.req.query("owner");
   const key = c.req.query("key") || "";
 
-  if (!isValidVaultName(vault) || !isValidFileKey(key)) {
-    return c.text("Invalid parameters", 400);
-  }
+  const res = await resolveVaultTarget(c, vault, owner);
+  if (res.error || !res.target) return c.text(res.error || "Invalid parameters", (res.status || 400) as any);
+  if (!isValidFileKey(key)) return c.text("Invalid parameters", 400);
+  const { ownerId, vault: targetVault } = res.target;
 
-  const obj = await c.env.CLOUDSYNC_BUCKET.head(`users/${userId}/vaults/${vault}/${key}`);
+  const obj = await c.env.CLOUDSYNC_BUCKET.head(`users/${ownerId}/vaults/${targetVault}/${key}`);
   if (!obj) return c.text("File not found", 404);
 
   const headers = new Headers();
@@ -1023,15 +1179,16 @@ app.on("HEAD", "/api/sync/file", async (c) => {
 });
 
 app.put("/api/sync/file", async (c) => {
-  const userId = c.get("userId");
   const vault = c.req.query("vault") || "default";
+  const owner = c.req.query("owner");
   const key = c.req.query("key") || "";
 
-  if (!isValidVaultName(vault) || !isValidFileKey(key)) {
-    return c.json({ error: "Invalid parameters." }, 400);
-  }
+  const res = await resolveVaultTarget(c, vault, owner);
+  if (res.error || !res.target) return c.json({ error: res.error }, (res.status || 400) as any);
+  if (!isValidFileKey(key)) return c.json({ error: "Invalid parameters." }, 400);
+  const { ownerId, vault: targetVault } = res.target;
 
-  const r2Key = `users/${userId}/vaults/${vault}/${key}`;
+  const r2Key = `users/${ownerId}/vaults/${targetVault}/${key}`;
   const mtime = c.req.header("x-mtime") || `${Date.now()}`;
   const ctime = c.req.header("x-ctime") || mtime;
   const contentType = c.req.header("content-type") || "application/octet-stream";
@@ -1046,7 +1203,7 @@ app.put("/api/sync/file", async (c) => {
         const histData = await existing.arrayBuffer();
         const existingMtime = existing.customMetadata?.mtime || `${Date.now()}`;
         await c.env.CLOUDSYNC_BUCKET.put(
-          `users/${userId}/history/${vault}/${key}/${existingMtime}`,
+          `users/${ownerId}/history/${targetVault}/${key}/${existingMtime}`,
           histData,
           { customMetadata: { mtime: existingMtime, size: `${existing.size}` } }
         );
@@ -1068,8 +1225,8 @@ app.put("/api/sync/file", async (c) => {
 
   const rev = await recordVaultChange(
     c.env,
-    userId,
-    vault,
+    ownerId,
+    targetVault,
     key,
     "put",
     Number.parseInt(mtime, 10),
@@ -1088,32 +1245,36 @@ app.put("/api/sync/file", async (c) => {
 });
 
 app.put("/api/sync/cursor", async (c) => {
-  const userId = c.get("userId");
   const vault = c.req.query("vault") || "default";
+  const owner = c.req.query("owner");
   const key = c.req.query("key") || "";
   const lineStr = c.req.header("x-cursor-line");
   const chStr = c.req.header("x-cursor-ch");
 
-  if (!isValidVaultName(vault) || !isValidFileKey(key) || lineStr === undefined || chStr === undefined) {
+  const res = await resolveVaultTarget(c, vault, owner);
+  if (res.error || !res.target) return c.json({ error: res.error }, (res.status || 400) as any);
+  if (!isValidFileKey(key) || lineStr === undefined || chStr === undefined) {
     return c.json({ error: "Invalid cursor coordinates" }, 400);
   }
+  const { ownerId, vault: targetVault } = res.target;
 
   const cursor = { line: Number.parseInt(lineStr, 10), ch: Number.parseInt(chStr, 10) };
-  const rev = await recordVaultChange(c.env, userId, vault, key, "cursor", Date.now(), undefined, cursor);
+  const rev = await recordVaultChange(c.env, ownerId, targetVault, key, "cursor", Date.now(), undefined, cursor);
 
   return c.json({ ok: true, revision: rev });
 });
 
 app.delete("/api/sync/file", async (c) => {
-  const userId = c.get("userId");
   const vault = c.req.query("vault") || "default";
+  const owner = c.req.query("owner");
   const key = c.req.query("key") || "";
 
-  if (!isValidVaultName(vault) || !isValidFileKey(key)) {
-    return c.json({ error: "Invalid file key." }, 400);
-  }
+  const res = await resolveVaultTarget(c, vault, owner);
+  if (res.error || !res.target) return c.json({ error: res.error }, (res.status || 400) as any);
+  if (!isValidFileKey(key)) return c.json({ error: "Invalid file key." }, 400);
+  const { ownerId, vault: targetVault } = res.target;
 
-  const r2Key = `users/${userId}/vaults/${vault}/${key}`;
+  const r2Key = `users/${ownerId}/vaults/${targetVault}/${key}`;
 
   if (key.endsWith("/")) {
     let cursor: string | undefined = undefined;
@@ -1126,12 +1287,11 @@ app.delete("/api/sync/file", async (c) => {
       cursor = list.truncated ? list.cursor : undefined;
     }
   } else {
-    // Preserve in trash
     try {
       const existing = await c.env.CLOUDSYNC_BUCKET.get(r2Key);
       if (existing) {
         const data = await existing.arrayBuffer();
-        await c.env.CLOUDSYNC_BUCKET.put(`users/${userId}/trash/${vault}/${key}`, data, {
+        await c.env.CLOUDSYNC_BUCKET.put(`users/${ownerId}/trash/${targetVault}/${key}`, data, {
           customMetadata: { ...existing.customMetadata, deletedAt: `${Date.now()}` },
         });
       }
@@ -1139,15 +1299,17 @@ app.delete("/api/sync/file", async (c) => {
   }
 
   await c.env.CLOUDSYNC_BUCKET.delete(r2Key);
-  const rev = await recordVaultChange(c.env, userId, vault, key, "delete", Date.now());
+  const rev = await recordVaultChange(c.env, ownerId, targetVault, key, "delete", Date.now());
 
   return c.json({ ok: true, revision: rev });
 });
 
 app.post("/api/sync/rename", async (c) => {
-  const userId = c.get("userId");
   const vault = c.req.query("vault") || "default";
-  if (!isValidVaultName(vault)) return c.json({ error: "Invalid vault." }, 400);
+  const owner = c.req.query("owner");
+  const res = await resolveVaultTarget(c, vault, owner);
+  if (res.error || !res.target) return c.json({ error: res.error }, (res.status || 400) as any);
+  const { ownerId, vault: targetVault } = res.target;
 
   let body: { from?: string; to?: string };
   try {
@@ -1160,8 +1322,8 @@ app.post("/api/sync/rename", async (c) => {
     return c.json({ error: "Invalid file paths." }, 400);
   }
 
-  const sourceKey = `users/${userId}/vaults/${vault}/${body.from}`;
-  const targetKey = `users/${userId}/vaults/${vault}/${body.to}`;
+  const sourceKey = `users/${ownerId}/vaults/${targetVault}/${body.from}`;
+  const targetKey = `users/${ownerId}/vaults/${targetVault}/${body.to}`;
 
   const source = await c.env.CLOUDSYNC_BUCKET.get(sourceKey);
   if (!source) return c.json({ error: "Source not found" }, 404);
@@ -1173,11 +1335,11 @@ app.post("/api/sync/rename", async (c) => {
   });
   await c.env.CLOUDSYNC_BUCKET.delete(sourceKey);
 
-  await recordVaultChange(c.env, userId, vault, body.from, "delete", Date.now());
+  await recordVaultChange(c.env, ownerId, targetVault, body.from, "delete", Date.now());
   const rev = await recordVaultChange(
     c.env,
-    userId,
-    vault,
+    ownerId,
+    targetVault,
     body.to,
     "put",
     Number.parseInt(source.customMetadata?.mtime || `${Date.now()}`, 10),
@@ -1189,11 +1351,13 @@ app.post("/api/sync/rename", async (c) => {
 
 // Trash recovery
 app.get("/api/sync/trash", async (c) => {
-  const userId = c.get("userId");
   const vault = c.req.query("vault") || "default";
-  if (!isValidVaultName(vault)) return c.json({ error: "Invalid vault." }, 400);
+  const owner = c.req.query("owner");
+  const res = await resolveVaultTarget(c, vault, owner);
+  if (res.error || !res.target) return c.json({ error: res.error }, (res.status || 400) as any);
+  const { ownerId, vault: targetVault } = res.target;
 
-  const prefix = `users/${userId}/trash/${vault}/`;
+  const prefix = `users/${ownerId}/trash/${targetVault}/`;
   const list = await c.env.CLOUDSYNC_BUCKET.list({ prefix, limit: 200 });
 
   const files = list.objects.map((o) => ({
@@ -1209,9 +1373,11 @@ app.get("/api/sync/trash", async (c) => {
 });
 
 app.post("/api/sync/trash/restore", async (c) => {
-  const userId = c.get("userId");
   const vault = c.req.query("vault") || "default";
-  if (!isValidVaultName(vault)) return c.json({ error: "Invalid vault." }, 400);
+  const owner = c.req.query("owner");
+  const res = await resolveVaultTarget(c, vault, owner);
+  if (res.error || !res.target) return c.json({ error: res.error }, (res.status || 400) as any);
+  const { ownerId, vault: targetVault } = res.target;
 
   let body: { key?: string };
   try {
@@ -1223,8 +1389,8 @@ app.post("/api/sync/trash/restore", async (c) => {
   const key = (body?.key || "").trim();
   if (!isValidFileKey(key)) return c.json({ error: "Invalid key." }, 400);
 
-  const trashKey = `users/${userId}/trash/${vault}/${key}`;
-  const targetKey = `users/${userId}/vaults/${vault}/${key}`;
+  const trashKey = `users/${ownerId}/trash/${targetVault}/${key}`;
+  const targetKey = `users/${ownerId}/vaults/${targetVault}/${key}`;
 
   const trashObj = await c.env.CLOUDSYNC_BUCKET.get(trashKey);
   if (!trashObj) return c.json({ error: "File not found in trash." }, 404);
@@ -1236,19 +1402,22 @@ app.post("/api/sync/trash/restore", async (c) => {
   });
   await c.env.CLOUDSYNC_BUCKET.delete(trashKey);
 
-  const rev = await recordVaultChange(c.env, userId, vault, key, "put", mtime, data.byteLength);
+  const rev = await recordVaultChange(c.env, ownerId, targetVault, key, "put", mtime, data.byteLength);
   return c.json({ ok: true, key, revision: rev });
 });
 
 // History versions
 app.get("/api/sync/history", async (c) => {
-  const userId = c.get("userId");
   const vault = c.req.query("vault") || "default";
+  const owner = c.req.query("owner");
   const key = c.req.query("key") || "";
 
-  if (!isValidVaultName(vault) || !isValidFileKey(key)) return c.json({ error: "Invalid parameters." }, 400);
+  const res = await resolveVaultTarget(c, vault, owner);
+  if (res.error || !res.target) return c.json({ error: res.error }, (res.status || 400) as any);
+  if (!isValidFileKey(key)) return c.json({ error: "Invalid parameters." }, 400);
+  const { ownerId, vault: targetVault } = res.target;
 
-  const prefix = `users/${userId}/history/${vault}/${key}/`;
+  const prefix = `users/${ownerId}/history/${targetVault}/${key}/`;
   const list = await c.env.CLOUDSYNC_BUCKET.list({ prefix, limit: 100 });
 
   const versions = list.objects.map((o) => {
@@ -1262,16 +1431,17 @@ app.get("/api/sync/history", async (c) => {
 });
 
 app.get("/api/sync/history/version", async (c) => {
-  const userId = c.get("userId");
   const vault = c.req.query("vault") || "default";
+  const owner = c.req.query("owner");
   const key = c.req.query("key") || "";
   const versionId = c.req.query("versionId") || "";
 
-  if (!isValidVaultName(vault) || !isValidFileKey(key) || !versionId) {
-    return c.json({ error: "Invalid parameters." }, 400);
-  }
+  const res = await resolveVaultTarget(c, vault, owner);
+  if (res.error || !res.target) return c.json({ error: res.error }, (res.status || 400) as any);
+  if (!isValidFileKey(key) || !versionId) return c.json({ error: "Invalid parameters." }, 400);
+  const { ownerId, vault: targetVault } = res.target;
 
-  const histKey = `users/${userId}/history/${vault}/${key}/${versionId}`;
+  const histKey = `users/${ownerId}/history/${targetVault}/${key}/${versionId}`;
   const obj = await c.env.CLOUDSYNC_BUCKET.get(histKey);
   if (!obj) return c.json({ error: "Historical version not found." }, 404);
 
@@ -1281,8 +1451,12 @@ app.get("/api/sync/history/version", async (c) => {
 });
 
 app.post("/api/sync/history/restore", async (c) => {
-  const userId = c.get("userId");
   const vault = c.req.query("vault") || "default";
+  const owner = c.req.query("owner");
+
+  const res = await resolveVaultTarget(c, vault, owner);
+  if (res.error || !res.target) return c.json({ error: res.error }, (res.status || 400) as any);
+  const { ownerId, vault: targetVault } = res.target;
 
   let body: { key?: string; versionId?: string };
   try {
@@ -1293,39 +1467,48 @@ app.post("/api/sync/history/restore", async (c) => {
 
   const key = (body?.key || "").trim();
   const versionId = (body?.versionId || "").trim();
-  if (!isValidVaultName(vault) || !isValidFileKey(key) || !versionId) {
+  if (!isValidFileKey(key) || !versionId) {
     return c.json({ error: "Invalid parameters." }, 400);
   }
 
-  const hist = await c.env.CLOUDSYNC_BUCKET.get(`users/${userId}/history/${vault}/${key}/${versionId}`);
+  const hist = await c.env.CLOUDSYNC_BUCKET.get(`users/${ownerId}/history/${targetVault}/${key}/${versionId}`);
   if (!hist) return c.json({ error: "Version not found." }, 404);
 
   const data = await hist.arrayBuffer();
   const mtime = Date.now();
-  await c.env.CLOUDSYNC_BUCKET.put(`users/${userId}/vaults/${vault}/${key}`, data, {
+  await c.env.CLOUDSYNC_BUCKET.put(`users/${ownerId}/vaults/${targetVault}/${key}`, data, {
     customMetadata: { mtime: `${mtime}` },
   });
 
-  const rev = await recordVaultChange(c.env, userId, vault, key, "put", mtime, data.byteLength);
+  const rev = await recordVaultChange(c.env, ownerId, targetVault, key, "put", mtime, data.byteLength);
   return c.json({ ok: true, key, revision: rev });
 });
 
 // Shares
 app.get("/api/sync/shares", async (c) => {
-  const userId = c.get("userId");
   const vault = c.req.query("vault") || "default";
-  if (!isValidVaultName(vault)) return c.json({ error: "Invalid vault." }, 400);
+  const owner = c.req.query("owner");
 
-  const raw = await getStoredData(c, `vault_shares:${userId}:${vault}`);
+  const res = await resolveVaultTarget(c, vault, owner);
+  if (res.error || !res.target) return c.json({ error: res.error }, (res.status || 400) as any);
+  const { ownerId, vault: targetVault } = res.target;
+
+  const raw = await getStoredData(c, `vault_shares:${ownerId}:${targetVault}`);
   const shares: string[] = raw ? JSON.parse(raw) : [];
-  return c.json({ ok: true, vault, shares });
+  return c.json({ ok: true, vault: targetVault, shares, isOwner: res.target.isOwner });
 });
 
 app.post("/api/sync/shares", async (c) => {
-  const userId = c.get("userId");
-  const currentUsername = c.get("username");
+  const currentUsername = c.get("username") || "";
   const vault = c.req.query("vault") || "default";
-  if (!isValidVaultName(vault)) return c.json({ error: "Invalid vault." }, 400);
+  const owner = c.req.query("owner");
+
+  const res = await resolveVaultTarget(c, vault, owner);
+  if (res.error || !res.target) return c.json({ error: res.error }, (res.status || 400) as any);
+  if (!res.target.isOwner) {
+    return c.json({ error: "Only the vault owner can manage collaborators." }, 403);
+  }
+  const { ownerId, vault: targetVault } = res.target;
 
   let body: { inviteUsername?: string };
   try {
@@ -1342,10 +1525,11 @@ app.post("/api/sync/shares", async (c) => {
     return c.json({ error: "You cannot invite yourself." }, 400);
   }
 
-  const inviteUser = await getStoredData(c, `user:${inviteUsername.toLowerCase()}`);
-  if (!inviteUser) return c.json({ error: `User "${inviteUsername}" does not exist.` }, 404);
+  const inviteUserRaw = await getStoredData(c, `user:${inviteUsername.toLowerCase()}`);
+  if (!inviteUserRaw) return c.json({ error: `User "${inviteUsername}" does not exist.` }, 404);
+  const inviteUser = JSON.parse(inviteUserRaw);
 
-  const sharesKey = `vault_shares:${userId}:${vault}`;
+  const sharesKey = `vault_shares:${ownerId}:${targetVault}`;
   const raw = await getStoredData(c, sharesKey);
   const shares: string[] = raw ? JSON.parse(raw) : [];
 
@@ -1354,32 +1538,76 @@ app.post("/api/sync/shares", async (c) => {
     await putStoredData(c, sharesKey, JSON.stringify(shares));
   }
 
+  // Update invitee's shared vaults reverse index
+  try {
+    const inviteeSharesKey = `user_shared_vaults:${inviteUser.id}`;
+    const inviteeRaw = await getStoredData(c, inviteeSharesKey);
+    let inviteeShares: Array<{ vault: string; ownerId: string; ownerUsername: string }> = inviteeRaw ? JSON.parse(inviteeRaw) : [];
+    if (!inviteeShares.some((s) => s.vault === targetVault && s.ownerId === ownerId)) {
+      inviteeShares.push({
+        vault: targetVault,
+        ownerId,
+        ownerUsername: currentUsername,
+      });
+      await putStoredData(c, inviteeSharesKey, JSON.stringify(inviteeShares));
+    }
+  } catch (err) {
+    console.error("Failed to update invitee shares reverse index:", err);
+  }
+
   return c.json({ ok: true, message: `Vault shared with ${inviteUsername}`, shares });
 });
 
 app.delete("/api/sync/shares", async (c) => {
-  const userId = c.get("userId");
   const vault = c.req.query("vault") || "default";
+  const owner = c.req.query("owner");
   const username = c.req.query("username");
-  if (!isValidVaultName(vault) || !username) return c.json({ error: "Invalid parameters." }, 400);
+  if (!username) return c.json({ error: "Invalid parameters." }, 400);
 
-  const sharesKey = `vault_shares:${userId}:${vault}`;
+  const res = await resolveVaultTarget(c, vault, owner);
+  if (res.error || !res.target) return c.json({ error: res.error }, (res.status || 400) as any);
+  if (!res.target.isOwner) {
+    return c.json({ error: "Only the vault owner can manage collaborators." }, 403);
+  }
+  const { ownerId, vault: targetVault } = res.target;
+
+  const sharesKey = `vault_shares:${ownerId}:${targetVault}`;
   const raw = await getStoredData(c, sharesKey);
   let shares: string[] = raw ? JSON.parse(raw) : [];
   shares = shares.filter((u) => u.toLowerCase() !== username.toLowerCase());
   await putStoredData(c, sharesKey, JSON.stringify(shares));
+
+  // Update invitee's shared vaults reverse index
+  try {
+    const targetUserRaw = await getStoredData(c, `user:${username.toLowerCase()}`);
+    if (targetUserRaw) {
+      const targetUser = JSON.parse(targetUserRaw);
+      const inviteeSharesKey = `user_shared_vaults:${targetUser.id}`;
+      const inviteeRaw = await getStoredData(c, inviteeSharesKey);
+      if (inviteeRaw) {
+        let inviteeShares: Array<{ vault: string; ownerId: string; ownerUsername: string }> = JSON.parse(inviteeRaw);
+        inviteeShares = inviteeShares.filter((s) => !(s.vault === targetVault && s.ownerId === ownerId));
+        await putStoredData(c, inviteeSharesKey, JSON.stringify(inviteeShares));
+      }
+    }
+  } catch (err) {
+    console.error("Failed to remove invitee shares reverse index:", err);
+  }
 
   return c.json({ ok: true, shares });
 });
 
 // Devices
 app.get("/api/sync/devices", async (c) => {
-  const userId = c.get("userId");
   const vault = c.req.query("vault") || "default";
-  if (!isValidVaultName(vault)) return c.json({ error: "Invalid vault." }, 400);
+  const owner = c.req.query("owner");
+
+  const res = await resolveVaultTarget(c, vault, owner);
+  if (res.error || !res.target) return c.json({ error: res.error }, (res.status || 400) as any);
+  const { ownerId, vault: targetVault } = res.target;
 
   try {
-    const raw = await getStoredData(c, `vault_devices:${userId}:${vault}`);
+    const raw = await getStoredData(c, `vault_devices:${ownerId}:${targetVault}`);
     const devices: DeviceInfo[] = raw ? JSON.parse(raw) : [];
     return c.json({ devices });
   } catch (err: any) {
@@ -1388,9 +1616,12 @@ app.get("/api/sync/devices", async (c) => {
 });
 
 app.put("/api/sync/devices", async (c) => {
-  const userId = c.get("userId");
   const vault = c.req.query("vault") || "default";
-  if (!isValidVaultName(vault)) return c.json({ error: "Invalid vault." }, 400);
+  const owner = c.req.query("owner");
+
+  const res = await resolveVaultTarget(c, vault, owner);
+  if (res.error || !res.target) return c.json({ error: res.error }, (res.status || 400) as any);
+  const { ownerId, vault: targetVault } = res.target;
 
   let body: any;
   try {
@@ -1403,7 +1634,7 @@ app.put("/api/sync/devices", async (c) => {
     return c.json({ error: "Invalid deviceId" }, 400);
   }
 
-  const devicesKey = `vault_devices:${userId}:${vault}`;
+  const devicesKey = `vault_devices:${ownerId}:${targetVault}`;
   try {
     const raw = await getStoredData(c, devicesKey);
     let devices: DeviceInfo[] = raw ? JSON.parse(raw) : [];
@@ -1428,15 +1659,17 @@ app.put("/api/sync/devices", async (c) => {
 });
 
 app.delete("/api/sync/devices/:deviceId", async (c) => {
-  const userId = c.get("userId");
   const vault = c.req.query("vault") || "default";
+  const owner = c.req.query("owner");
   const deviceId = c.req.param("deviceId");
 
-  if (!isValidVaultName(vault) || !deviceId) {
-    return c.json({ error: "Invalid parameters." }, 400);
-  }
+  if (!deviceId) return c.json({ error: "Invalid parameters." }, 400);
 
-  const devicesKey = `vault_devices:${userId}:${vault}`;
+  const res = await resolveVaultTarget(c, vault, owner);
+  if (res.error || !res.target) return c.json({ error: res.error }, (res.status || 400) as any);
+  const { ownerId, vault: targetVault } = res.target;
+
+  const devicesKey = `vault_devices:${ownerId}:${targetVault}`;
   try {
     const raw = await getStoredData(c, devicesKey);
     let devices: DeviceInfo[] = raw ? JSON.parse(raw) : [];

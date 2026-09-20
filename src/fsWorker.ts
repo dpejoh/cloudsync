@@ -51,13 +51,23 @@ export class FakeFsWorker extends FakeFs {
     return h;
   }
 
+  private get vaultQuery(): string {
+    const v = encodeURIComponent(this.vaultName);
+    if (
+      this.config.vaultOwner &&
+      this.config.vaultOwner.toLowerCase() !==
+        (this.config.username || "").toLowerCase()
+    ) {
+      return `vault=${v}&owner=${encodeURIComponent(this.config.vaultOwner)}`;
+    }
+    return `vault=${v}`;
+  }
+
   async walk(): Promise<Entity[]> {
     if (!this.baseUrl) {
       throw new Error("CloudSync server URL is not configured.");
     }
-    const url = `${this.baseUrl}/api/sync/walk?vault=${encodeURIComponent(
-      this.vaultName
-    )}`;
+    const url = `${this.baseUrl}/api/sync/walk?${this.vaultQuery}`;
     const res = await requestUrl({
       url,
       method: "GET",
@@ -80,9 +90,7 @@ export class FakeFsWorker extends FakeFs {
   }
 
   async stat(key: string): Promise<Entity> {
-    const url = `${this.baseUrl}/api/sync/file?vault=${encodeURIComponent(
-      this.vaultName
-    )}&key=${encodeURIComponent(key)}`;
+    const url = `${this.baseUrl}/api/sync/file?${this.vaultQuery}&key=${encodeURIComponent(key)}`;
     const res = await requestUrl({
       url,
       method: "HEAD",
@@ -117,9 +125,7 @@ export class FakeFsWorker extends FakeFs {
     ctime?: number
   ): Promise<Entity> {
     const normKey = key.endsWith("/") ? key : `${key}/`;
-    const url = `${this.baseUrl}/api/sync/file?vault=${encodeURIComponent(
-      this.vaultName
-    )}&key=${encodeURIComponent(normKey)}`;
+    const url = `${this.baseUrl}/api/sync/file?${this.vaultQuery}&key=${encodeURIComponent(normKey)}`;
 
     const res = await requestUrl({
       url,
@@ -154,9 +160,7 @@ export class FakeFsWorker extends FakeFs {
     ctime: number,
     cursor?: { line: number; ch: number }
   ): Promise<Entity> {
-    const url = `${this.baseUrl}/api/sync/file?vault=${encodeURIComponent(
-      this.vaultName
-    )}&key=${encodeURIComponent(key)}`;
+    const url = `${this.baseUrl}/api/sync/file?${this.vaultQuery}&key=${encodeURIComponent(key)}`;
 
     const headers: Record<string, string> = {
       ...this.headers,
@@ -198,9 +202,7 @@ export class FakeFsWorker extends FakeFs {
   }
 
   async readFile(key: string): Promise<ArrayBuffer> {
-    const url = `${this.baseUrl}/api/sync/file?vault=${encodeURIComponent(
-      this.vaultName
-    )}&key=${encodeURIComponent(key)}`;
+    const url = `${this.baseUrl}/api/sync/file?${this.vaultQuery}&key=${encodeURIComponent(key)}`;
 
     const res = await requestUrl({
       url,
@@ -216,9 +218,7 @@ export class FakeFsWorker extends FakeFs {
   }
 
   async rename(key1: string, key2: string): Promise<void> {
-    const url = `${this.baseUrl}/api/sync/rename?vault=${encodeURIComponent(
-      this.vaultName
-    )}`;
+    const url = `${this.baseUrl}/api/sync/rename?${this.vaultQuery}`;
 
     const res = await requestUrl({
       url,
@@ -240,9 +240,7 @@ export class FakeFsWorker extends FakeFs {
   }
 
   async rm(key: string): Promise<void> {
-    const url = `${this.baseUrl}/api/sync/file?vault=${encodeURIComponent(
-      this.vaultName
-    )}&key=${encodeURIComponent(key)}`;
+    const url = `${this.baseUrl}/api/sync/file?${this.vaultQuery}&key=${encodeURIComponent(key)}`;
 
     const res = await requestUrl({
       url,
@@ -264,9 +262,7 @@ export class FakeFsWorker extends FakeFs {
     if (!this.baseUrl || !this.config.token) {
       return { ok: false, revision: 0, fullScanNeeded: false, changes: [] };
     }
-    const url = `${this.baseUrl}/api/sync/changes?vault=${encodeURIComponent(
-      this.vaultName
-    )}&since=${sinceRev}`;
+    const url = `${this.baseUrl}/api/sync/changes?${this.vaultQuery}&since=${sinceRev}`;
 
     const res = await requestUrl({
       url,
@@ -291,9 +287,7 @@ export class FakeFsWorker extends FakeFs {
     cursor: { line: number; ch: number }
   ): Promise<void> {
     if (!this.baseUrl || !this.config.token) return;
-    const url = `${this.baseUrl}/api/sync/cursor?vault=${encodeURIComponent(
-      this.vaultName
-    )}&key=${encodeURIComponent(key)}`;
+    const url = `${this.baseUrl}/api/sync/cursor?${this.vaultQuery}&key=${encodeURIComponent(key)}`;
 
     const res = await requestUrl({
       url,
@@ -344,9 +338,7 @@ export class FakeFsWorker extends FakeFs {
 
   async getDevices(): Promise<DeviceInfo[]> {
     if (!this.baseUrl || !this.config.token) return [];
-    const url = `${this.baseUrl}/api/sync/devices?vault=${encodeURIComponent(
-      this.vaultName
-    )}`;
+    const url = `${this.baseUrl}/api/sync/devices?${this.vaultQuery}`;
 
     const res = await requestUrl({
       url,
@@ -365,9 +357,7 @@ export class FakeFsWorker extends FakeFs {
     device: Partial<DeviceInfo> & { deviceId: string }
   ): Promise<void> {
     if (!this.baseUrl || !this.config.token) return;
-    const url = `${this.baseUrl}/api/sync/devices?vault=${encodeURIComponent(
-      this.vaultName
-    )}`;
+    const url = `${this.baseUrl}/api/sync/devices?${this.vaultQuery}`;
 
     await requestUrl({
       url,
@@ -385,7 +375,7 @@ export class FakeFsWorker extends FakeFs {
     if (!this.baseUrl || !this.config.token) return;
     const url = `${this.baseUrl}/api/sync/devices/${encodeURIComponent(
       deviceId
-    )}?vault=${encodeURIComponent(this.vaultName)}`;
+    )}?${this.vaultQuery}`;
 
     await requestUrl({
       url,

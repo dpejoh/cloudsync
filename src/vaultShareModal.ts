@@ -1,4 +1,4 @@
-import { App, Modal, Notice, Setting, requestUrl } from "obsidian";
+import { App, Modal, Notice, requestUrl } from "obsidian";
 import type CloudSyncPlugin from "./main";
 
 export class VaultShareModal extends Modal {
@@ -15,10 +15,12 @@ export class VaultShareModal extends Modal {
     this.vaultName = vaultName;
   }
 
-  async onOpen() {
-    this.contentEl.addClass("sync-vault-share-container");
-    await this.fetchShares();
+  onOpen() {
+    this.setTitle(`Manage sharing for "${this.vaultName}"`);
+    this.contentEl.addClass("vault-share-modal");
+    this.isLoading = true;
     this.render();
+    this.fetchShares().then(() => this.render());
   }
 
   onClose() {
@@ -40,7 +42,7 @@ export class VaultShareModal extends Modal {
         throw: false,
       });
 
-      if (res.status === 200 && res.json?.shares) {
+      if (res.status === 200 && Array.isArray(res.json?.shares)) {
         this.shares = res.json.shares;
       } else {
         this.shares = [];
@@ -115,13 +117,8 @@ export class VaultShareModal extends Modal {
     const { contentEl } = this;
     contentEl.empty();
 
-    contentEl.createEl("h2", {
-      text: `Manage sharing for “${this.vaultName}”`,
-      cls: "modal-title",
-    });
-
     contentEl.createEl("p", {
-      cls: "u-muted",
+      cls: "setting-item-description",
       text: "This remote vault is currently shared with the following people:",
     });
 
@@ -131,17 +128,17 @@ export class VaultShareModal extends Modal {
     }
 
     const sharesContainerEl = contentEl.createDiv({
-      cls: "sync-vault-shares-list-item-container",
+      cls: "vault-shares-list",
     });
 
     if (this.isLoading) {
-      sharesContainerEl.createEl("p", {
-        cls: "u-muted",
+      sharesContainerEl.createDiv({
+        cls: "empty-shares-notice",
         text: "Loading collaborators...",
       });
     } else if (this.shares.length === 0) {
-      sharesContainerEl.createEl("p", {
-        cls: "u-muted",
+      sharesContainerEl.createDiv({
+        cls: "empty-shares-notice",
         text: "This remote vault is not currently shared with anyone.",
       });
     } else {
@@ -158,28 +155,36 @@ export class VaultShareModal extends Modal {
       }
     }
 
-        const inviteSetting = new Setting(contentEl)
-      .setName("Invite user")
-      .addText((text) => {
-        text
-          .setPlaceholder("Enter their username...")
-          .setValue(this.inviteUsername)
-          .onChange((val) => {
-            this.inviteUsername = val;
-            this.errorMessage = null;
-          });
-        text.inputEl.addEventListener("keydown", (e) => {
-          if (e.key === "Enter") this.inviteUser();
-        });
-      })
-      .addButton((btn) => {
-        btn
-          .setButtonText("Add")
-          .setCta()
-          .onClick(() => this.inviteUser());
-      });
+    // Invite user compact row
+    const inviteSection = contentEl.createDiv({ cls: "invite-section" });
+    inviteSection.createEl("div", {
+      cls: "invite-section-title",
+      text: "Invite user",
+    });
 
-        const footer = contentEl.createDiv({ cls: "modal-button-container" });
+    const inviteRow = inviteSection.createDiv({ cls: "invite-row" });
+    const inputEl = inviteRow.createEl("input", {
+      type: "text",
+      placeholder: "Enter their username...",
+      cls: "invite-input",
+      value: this.inviteUsername,
+    });
+    inputEl.oninput = (e) => {
+      this.inviteUsername = (e.target as HTMLInputElement).value;
+      this.errorMessage = null;
+    };
+    inputEl.onkeydown = (e) => {
+      if (e.key === "Enter") this.inviteUser();
+    };
+
+    const addBtn = inviteRow.createEl("button", {
+      cls: "mod-cta invite-btn",
+      text: "Add",
+    });
+    addBtn.onclick = () => this.inviteUser();
+
+    // Footer with Done button
+    const footer = contentEl.createDiv({ cls: "modal-button-container" });
     footer.createEl("button", { text: "Done" }, (btn) => {
       btn.onclick = () => this.close();
     });
