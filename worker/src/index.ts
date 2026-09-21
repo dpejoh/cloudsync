@@ -321,6 +321,57 @@ function checkAuthRateLimit(clientIp: string, limit = 20, windowMs = 60_000): bo
   return true;
 }
 
+function detectSafeImageType(bytes: Uint8Array): { mime: string; ext: string } | null {
+  if (bytes.length < 12) return null;
+
+  // PNG: 89 50 4E 47 0D 0A 1A 0A
+  if (
+    bytes[0] === 0x89 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x4e &&
+    bytes[3] === 0x47 &&
+    bytes[4] === 0x0d &&
+    bytes[5] === 0x0a &&
+    bytes[6] === 0x1a &&
+    bytes[7] === 0x0a
+  ) {
+    return { mime: "image/png", ext: "png" };
+  }
+
+  // JPEG: FF D8 FF
+  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+    return { mime: "image/jpeg", ext: "jpg" };
+  }
+
+  // WebP: 'RIFF' .... 'WEBP'
+  if (
+    bytes[0] === 0x52 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x46 &&
+    bytes[8] === 0x57 &&
+    bytes[9] === 0x45 &&
+    bytes[10] === 0x42 &&
+    bytes[11] === 0x50
+  ) {
+    return { mime: "image/webp", ext: "webp" };
+  }
+
+  // GIF: GIF87a or GIF89a
+  if (
+    bytes[0] === 0x47 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x38 &&
+    (bytes[4] === 0x37 || bytes[4] === 0x39) &&
+    bytes[5] === 0x61
+  ) {
+    return { mime: "image/gif", ext: "gif" };
+  }
+
+  return null;
+}
+
 async function recordVaultChange(
   env: Bindings,
   userId: string,
@@ -716,7 +767,12 @@ app.get("/api/auth/verify-token", async (c) => {
 // Authenticated route guard
 app.use("/api/*", async (c, next) => {
   const path = c.req.path;
-  if (path.startsWith("/api/auth/") || path === "/api/info") {
+  if (
+    path.startsWith("/api/auth/") ||
+    path === "/api/info" ||
+    (path.startsWith("/api/user/avatar/") && c.req.method.toUpperCase() === "GET") ||
+    (path.startsWith("/api/user/profile/") && c.req.method.toUpperCase() === "GET")
+  ) {
     return await next();
   }
 
@@ -759,21 +815,31 @@ app.get("/api/user/me", async (c) => {
   }
 
   let has2FA = false;
+  let displayName = username;
   if (username && username !== "Owner") {
     const raw = await getStoredData(c, `user:${username.toLowerCase()}`);
     if (raw) {
       try {
         const u = JSON.parse(raw);
         has2FA = Boolean(u.totpSecret);
+        if (u.displayName) displayName = u.displayName;
       } catch {}
     }
+  }
+
+  let hasAvatar = false;
+  if (username) {
+    const avatarRaw = await getStoredData(c, `user_avatar:${username.toLowerCase()}`);
+    hasAvatar = Boolean(avatarRaw);
   }
 
   return c.json({
     ok: true,
     userId,
     username,
+    displayName,
     has2FA,
+    hasAvatar,
     storageUsedBytes,
     quotaBytes: 10 * 1024 * 1024 * 1024,
   });
@@ -868,6 +934,161 @@ app.post("/api/user/change-password", async (c) => {
   await putStoredData(c, userKey, JSON.stringify(user));
 
   return c.json({ ok: true, message: "Password updated successfully." });
+});
+
+// Profile picture & avatar management
+const MAX_AVATAR_SIZE = 512 * 1024; // 512 KB
+
+app.get("/api/user/avatar/:username", async (c) => {
+  const username = c.req.param("username");
+  if (!/^[a-zA-Z0-9_-]{1,64}$/.test(username)) {
+    return c.json({ error: "Invalid username." }, 400);
+  }
+
+  const metaRaw = await getStoredData(c, `user_avatar:${username.toLowerCase()}`);
+  if (!metaRaw) {
+    return c.json({ error: "Avatar not found." }, 404);
+  }
+
+  let meta: { userId: string; mime: string };
+  try {
+    meta = JSON.parse(metaRaw);
+  } catch {
+    return c.json({ error: "Corrupted avatar metadata." }, 500);
+  }
+
+  const obj = await c.env.CLOUDSYNC_BUCKET.get(`users/${meta.userId}/avatar`);
+  if (!obj) {
+    return c.json({ error: "Avatar not found." }, 404);
+  }
+
+  const body = await obj.arrayBuffer();
+  return new Response(body, {
+    headers: {
+      "Content-Type": meta.mime || "image/png",
+      "Cache-Control": "public, max-age=3600, stale-while-revalidate=86400",
+      "X-Content-Type-Options": "nosniff",
+      "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+      "Content-Disposition": "inline",
+    },
+  });
+});
+
+app.post("/api/user/avatar", async (c) => {
+  const userId = c.get("userId");
+  const username = c.get("username");
+
+  const contentLength = Number(c.req.header("content-length") || "0");
+  if (contentLength > MAX_AVATAR_SIZE) {
+    return c.json({ error: "Avatar image exceeds maximum size of 512KB." }, 413);
+  }
+
+  let buffer: ArrayBuffer;
+  try {
+    buffer = await c.req.arrayBuffer();
+  } catch {
+    return c.json({ error: "Failed to read image payload." }, 400);
+  }
+
+  if (buffer.byteLength === 0) {
+    return c.json({ error: "Empty image payload." }, 400);
+  }
+
+  if (buffer.byteLength > MAX_AVATAR_SIZE) {
+    return c.json({ error: "Avatar image exceeds maximum size of 512KB." }, 413);
+  }
+
+  const imageInfo = detectSafeImageType(new Uint8Array(buffer));
+  if (!imageInfo) {
+    return c.json(
+      { error: "Invalid or unsafe image file. Supported formats: PNG, JPEG, WebP, GIF." },
+      400
+    );
+  }
+
+  await c.env.CLOUDSYNC_BUCKET.put(`users/${userId}/avatar`, buffer, {
+    httpMetadata: { contentType: imageInfo.mime },
+  });
+
+  await putStoredData(
+    c,
+    `user_avatar:${username.toLowerCase()}`,
+    JSON.stringify({ userId, mime: imageInfo.mime, updatedAt: Date.now() })
+  );
+
+  return c.json({ ok: true, message: "Avatar uploaded successfully." });
+});
+
+app.delete("/api/user/avatar", async (c) => {
+  const userId = c.get("userId");
+  const username = c.get("username");
+
+  try {
+    await c.env.CLOUDSYNC_BUCKET.delete(`users/${userId}/avatar`);
+  } catch (e) {
+    console.warn("Failed to delete avatar from bucket:", e);
+  }
+
+  await deleteStoredData(c, `user_avatar:${username.toLowerCase()}`);
+  return c.json({ ok: true, message: "Avatar removed." });
+});
+
+// User profile details (Display Name)
+app.post("/api/user/profile", async (c) => {
+  const username = c.get("username");
+  let body: { displayName?: string };
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "Invalid JSON payload." }, 400);
+  }
+
+  const displayName = (body?.displayName || "").trim();
+  if (displayName.length > 64) {
+    return c.json({ error: "Display name cannot exceed 64 characters." }, 400);
+  }
+
+  const sanitizedName = displayName.replace(/[<>]/g, "");
+
+  const userKey = `user:${username.toLowerCase()}`;
+  const raw = await getStoredData(c, userKey);
+  if (!raw) {
+    return c.json({ error: "User not found." }, 404);
+  }
+
+  const user = JSON.parse(raw);
+  user.displayName = sanitizedName;
+  await putStoredData(c, userKey, JSON.stringify(user));
+
+  return c.json({ ok: true, displayName: user.displayName });
+});
+
+app.get("/api/user/profile/:username", async (c) => {
+  const username = c.req.param("username");
+  if (!/^[a-zA-Z0-9_-]{1,64}$/.test(username)) {
+    return c.json({ error: "Invalid username." }, 400);
+  }
+
+  const raw = await getStoredData(c, `user:${username.toLowerCase()}`);
+  if (!raw) {
+    return c.json({ error: "User not found." }, 404);
+  }
+
+  let user: any;
+  try {
+    user = JSON.parse(raw);
+  } catch {
+    return c.json({ error: "Corrupted user record." }, 500);
+  }
+
+  const avatarRaw = await getStoredData(c, `user_avatar:${username.toLowerCase()}`);
+
+  return c.json({
+    ok: true,
+    username: user.username,
+    displayName: user.displayName || user.username,
+    hasAvatar: Boolean(avatarRaw),
+  });
 });
 
 // Vault management

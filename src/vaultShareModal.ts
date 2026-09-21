@@ -1,4 +1,4 @@
-import { App, Modal, Notice, requestUrl } from "obsidian";
+import { App, Modal, Notice, Platform, requestUrl } from "obsidian";
 import type CloudSyncPlugin from "./main";
 
 export class VaultShareModal extends Modal {
@@ -146,7 +146,69 @@ export class VaultShareModal extends Modal {
         const userRow = sharesContainerEl.createDiv({
           cls: "share-user-row",
         });
-        userRow.createSpan({ text: user, cls: "share-username" });
+        if (Platform.isMobile) {
+          userRow.addClass("is-fully-rounded");
+          userRow.style.borderRadius = "9999px";
+        }
+        const userInfo = userRow.createDiv({ cls: "share-user-info" });
+        const avatar = userInfo.createDiv({ cls: "share-user-avatar" });
+
+        const serverUrl = this.plugin.settings.cloudsync.serverUrl;
+        const initial = user.charAt(0).toUpperCase();
+
+        if (serverUrl) {
+          const img = avatar.createEl("img", {
+            cls: "share-user-avatar-img",
+            attr: {
+              src: `${serverUrl}/api/user/avatar/${encodeURIComponent(user)}`,
+              alt: user,
+            },
+          });
+          const fallback = avatar.createSpan({
+            cls: "share-user-avatar-fallback",
+            text: initial,
+          });
+          fallback.style.display = "none";
+
+          img.onload = () => {
+            img.style.display = "block";
+            fallback.style.display = "none";
+          };
+          img.onerror = () => {
+            img.remove();
+            fallback.style.display = "flex";
+          };
+        } else {
+          avatar.setText(initial);
+        }
+
+        const nameSpan = userInfo.createSpan({ text: user, cls: "share-username" });
+        if (serverUrl) {
+          requestUrl({
+            url: `${serverUrl}/api/user/profile/${encodeURIComponent(user)}`,
+            method: "GET",
+            throw: false,
+          })
+            .then((res) => {
+              if (
+                res.status === 200 &&
+                res.json?.displayName &&
+                res.json.displayName !== user
+              ) {
+                nameSpan.empty();
+                nameSpan.createSpan({
+                  text: res.json.displayName,
+                  cls: "share-display-name",
+                });
+                nameSpan.createSpan({
+                  text: ` (@${user})`,
+                  cls: "share-handle",
+                });
+              }
+            })
+            .catch(() => {});
+        }
+
         const removeBtn = userRow.createEl("button", {
           cls: "share-remove-btn mod-destructive",
           text: "Remove",

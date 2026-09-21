@@ -28,6 +28,7 @@ import { VaultPickerModal } from "./vaultPickerModal";
 import { ExcludedFoldersModal } from "./excludedFoldersModal";
 import { DeletedFilesModal } from "./deletedFilesModal";
 import { SyncLogModal } from "./syncLogModal";
+import { EditProfileModal } from "./editProfileModal";
 import { destroyDBs } from "./localdb";
 import { createOtpInput } from "./otpInput";
 import type CloudSyncPlugin from "./main";
@@ -810,33 +811,98 @@ export class CloudSyncSettingTab extends PluginSettingTab {
       .setName("Account & Server")
       .setHeading();
 
-    new Setting(containerEl)
-      .setName("Signed in as")
-      .setDesc(`${cs.username || (cs.mode === "single" ? "Personal Worker" : "User")} • ${cs.serverUrl}`)
-      .addButton((btn) => {
-        btn
-          .setButtonText("Log out")
-          .setClass("mod-destructive")
-          .onClick(async () => {
-            if (!confirm("Are you sure you want to log out on this device?")) {
-              return;
-            }
-            cs.token = "";
-            cs.username = "";
-            cs.email = "";
-            cs.encryptionKey = "";
-            cs.vaultId = "";
-            this.plugin.settings.password = "";
-            await this.plugin.saveSettings();
-            try {
-              await destroyDBs();
-            } catch (e) {
-              console.warn("Logout db destroy skipped:", e);
-            }
-            new Notice("Logged out.");
-            this.display();
-          });
+    // 1. Unified Profile Info Card (Avatar, Name, Handle, Server, Edit & Logout)
+    const profileCard = containerEl.createDiv({ cls: "profile-card" });
+    const profileLeft = profileCard.createDiv({ cls: "profile-card-left" });
+
+    const avatarWrapper = profileLeft.createDiv({ cls: "profile-card-avatar" });
+    const effectiveName = cs.displayName || cs.username || (cs.mode === "single" ? "Personal Worker" : "User");
+    const initial = (effectiveName || "U").charAt(0).toUpperCase();
+
+    if (cs.serverUrl && cs.username) {
+      const avatarImg = avatarWrapper.createEl("img", {
+        attr: {
+          src: `${cs.serverUrl}/api/user/avatar/${encodeURIComponent(cs.username)}?t=${Date.now()}`,
+          alt: effectiveName,
+        },
       });
+      const fallbackSpan = avatarWrapper.createSpan({
+        cls: "profile-card-avatar-fallback",
+        text: initial,
+      });
+      fallbackSpan.style.display = "none";
+
+      avatarImg.onload = () => {
+        avatarImg.style.display = "block";
+        fallbackSpan.style.display = "none";
+      };
+      avatarImg.onerror = () => {
+        avatarImg.remove();
+        fallbackSpan.style.display = "flex";
+      };
+    } else {
+      avatarWrapper.createSpan({
+        cls: "profile-card-avatar-fallback",
+        text: initial,
+      });
+    }
+
+    const profileInfo = profileLeft.createDiv({ cls: "profile-card-info" });
+    profileInfo.createEl("div", {
+      cls: "profile-card-name",
+      text: effectiveName,
+    });
+
+    let serverHost = "";
+    try {
+      if (cs.serverUrl) serverHost = new URL(cs.serverUrl).host;
+    } catch {}
+
+    const metaParts = [];
+    if (cs.username) metaParts.push(`@${cs.username}`);
+    if (serverHost) metaParts.push(serverHost);
+
+    profileInfo.createEl("div", {
+      cls: "profile-card-meta",
+      text: metaParts.join(" • "),
+    });
+
+    const profileActions = profileCard.createDiv({ cls: "profile-card-actions" });
+
+    if (cs.username) {
+      const editBtn = profileActions.createEl("button", {
+        cls: "profile-card-btn",
+        text: "Edit profile",
+      });
+      editBtn.onclick = () => {
+        new EditProfileModal(this.app, this.plugin, () => this.display()).open();
+      };
+    }
+
+    const logoutBtn = profileActions.createEl("button", {
+      cls: "profile-card-btn mod-destructive",
+      text: "Log out",
+    });
+    logoutBtn.onclick = async () => {
+      if (!confirm("Are you sure you want to log out on this device?")) {
+        return;
+      }
+      cs.token = "";
+      cs.username = "";
+      cs.displayName = "";
+      cs.email = "";
+      cs.encryptionKey = "";
+      cs.vaultId = "";
+      this.plugin.settings.password = "";
+      await this.plugin.saveSettings();
+      try {
+        await destroyDBs();
+      } catch (e) {
+        console.warn("Logout db destroy skipped:", e);
+      }
+      new Notice("Logged out.");
+      this.display();
+    };
 
     if (this.storageUsedBytes !== null) {
       const mb = (this.storageUsedBytes / (1024 * 1024)).toFixed(2);
@@ -1479,6 +1545,14 @@ export class CloudSyncSettingTab extends PluginSettingTab {
         }
         if (res.json?.has2FA !== undefined && cs.has2FA !== res.json.has2FA) {
           cs.has2FA = res.json.has2FA;
+          await this.plugin.saveSettings();
+        }
+        if (res.json?.hasAvatar !== undefined && cs.hasAvatar !== res.json.hasAvatar) {
+          cs.hasAvatar = res.json.hasAvatar;
+          await this.plugin.saveSettings();
+        }
+        if (res.json?.displayName !== undefined && cs.displayName !== res.json.displayName) {
+          cs.displayName = res.json.displayName;
           await this.plugin.saveSettings();
         }
       }

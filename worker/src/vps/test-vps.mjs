@@ -402,13 +402,112 @@ async function runTests() {
   }
   console.log("[25/25] GET /api/sync/file (revoked user gets 403 Forbidden) -> ok");
 
+  // 26. Avatar upload (Alice uploads valid PNG under 512KB)
+  const validPng = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACklEQVR4nGMAAQAABQABDQottAAAAABJRU5ErkJggg==",
+    "base64"
+  );
+  const avatarUploadRes = await fetch(`${BASE_URL}/api/user/avatar`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "image/png",
+    },
+    body: validPng,
+  });
+  const avatarUploadJson = await avatarUploadRes.json();
+  if (avatarUploadRes.status !== 200 || !avatarUploadJson.ok) {
+    throw new Error(`Avatar upload failed: status ${avatarUploadRes.status} ${JSON.stringify(avatarUploadJson)}`);
+  }
+  console.log("[26/30] POST /api/user/avatar (Alice uploads valid PNG under 512KB) -> ok");
+
+  // 27. GET /api/user/avatar/alice returns 200 with image/png and nosniff
+  const avatarGetRes = await fetch(`${BASE_URL}/api/user/avatar/alice`);
+  if (avatarGetRes.status !== 200) {
+    throw new Error(`Avatar GET failed: status ${avatarGetRes.status}`);
+  }
+  const avatarContentType = avatarGetRes.headers.get("content-type");
+  const nosniffHeader = avatarGetRes.headers.get("x-content-type-options");
+  if (!avatarContentType?.includes("image/png") || nosniffHeader !== "nosniff") {
+    throw new Error(`Avatar headers incorrect: Content-Type=${avatarContentType}, nosniff=${nosniffHeader}`);
+  }
+  console.log("[27/30] GET /api/user/avatar/alice -> ok (image/png + nosniff)");
+
+  // 28. POST /api/user/avatar with payload > 512KB rejected with 413 Payload Too Large
+  const oversizedPayload = Buffer.alloc(513 * 1024);
+  const oversizedRes = await fetch(`${BASE_URL}/api/user/avatar`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "image/png",
+    },
+    body: oversizedPayload,
+  });
+  if (oversizedRes.status !== 413) {
+    throw new Error(`Expected 413 for oversized avatar, got: ${oversizedRes.status}`);
+  }
+  console.log("[28/30] POST /api/user/avatar (>512KB rejected with 413 Payload Too Large) -> ok");
+
+  // 29. POST /api/user/avatar with non-image / SVG / script payload rejected with 400
+  const unsafePayload = Buffer.from("<svg onload=alert(1)>unsafe</svg>");
+  const unsafeRes = await fetch(`${BASE_URL}/api/user/avatar`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "image/svg+xml",
+    },
+    body: unsafePayload,
+  });
+  if (unsafeRes.status !== 400) {
+    throw new Error(`Expected 400 for unsafe payload, got: ${unsafeRes.status}`);
+  }
+  console.log("[29/30] POST /api/user/avatar (unsafe format rejected with 400 Bad Request) -> ok");
+
+  // 30. DELETE /api/user/avatar removes avatar and subsequent GET returns 404
+  const delAvatarRes = await fetch(`${BASE_URL}/api/user/avatar`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const delAvatarJson = await delAvatarRes.json();
+  if (delAvatarRes.status !== 200 || !delAvatarJson.ok) {
+    throw new Error(`Avatar delete failed: ${JSON.stringify(delAvatarJson)}`);
+  }
+  const postDelAvatarGet = await fetch(`${BASE_URL}/api/user/avatar/alice`);
+  if (postDelAvatarGet.status !== 404) {
+    throw new Error(`Expected 404 after avatar deletion, got: ${postDelAvatarGet.status}`);
+  }
+  console.log("[30/30] DELETE /api/user/avatar & verified 404 on subsequent GET -> ok");
+
+  // 31. POST /api/user/profile updates Alice's display name
+  const setProfileRes = await fetch(`${BASE_URL}/api/user/profile`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ displayName: "Alice Wonderland" }),
+  });
+  const setProfileJson = await setProfileRes.json();
+  if (!setProfileJson.ok || setProfileJson.displayName !== "Alice Wonderland") {
+    throw new Error(`Profile update failed: ${JSON.stringify(setProfileJson)}`);
+  }
+  console.log("[31/32] POST /api/user/profile (Alice sets display name) -> ok");
+
+  // 32. GET /api/user/profile/alice returns public profile with displayName
+  const getProfileRes = await fetch(`${BASE_URL}/api/user/profile/alice`);
+  const getProfileJson = await getProfileRes.json();
+  if (!getProfileJson.ok || getProfileJson.displayName !== "Alice Wonderland") {
+    throw new Error(`Public profile fetch failed: ${JSON.stringify(getProfileJson)}`);
+  }
+  console.log("[32/32] GET /api/user/profile/alice -> ok (displayName verified)");
+
   // Clean up collab-vault
   await fetch(`${BASE_URL}/api/vaults/collab-vault`, {
     method: "DELETE",
     headers: { Authorization: `Bearer ${token}` },
   });
 
-  console.log("\nall 25 vps endpoint tests passed");
+  console.log("\nall 32 vps endpoint tests passed");
 }
 
 runTests()
