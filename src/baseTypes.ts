@@ -7,6 +7,7 @@ export type SUPPORTED_SERVICES_TYPE = "cloudsync";
 export interface CloudSyncConfig {
   serverUrl: string;
   username: string;
+  displayName?: string;
   email?: string; // backwards compatibility
   token: string;
   vaultId: string;
@@ -14,6 +15,7 @@ export interface CloudSyncConfig {
   userId: string;
   mode?: "single" | "multi";
   has2FA?: boolean;
+  hasAvatar?: boolean;
   recoveryKey?: string;
   encryptionKey?: string;
   autoSyncIntervalMinutes?: number;
