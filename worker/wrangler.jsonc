@@ -14,10 +14,10 @@
   "kv_namespaces": [
     {
       "binding": "CLOUDSYNC_KV",
-      "id": "YOUR_KV_NAMESPACE_ID"
+      "id": "34ddb4d814844e0f8a4fafd5f2d5ef2c"
     }
   ],
   "vars": {
-    "JWT_SECRET": "cloudsync-default-super-secret-key-change-me"
+    "JWT_SECRET": "cloudsync-secret-666038b93c147fe3124f2908980e1f44"
   }
 }
