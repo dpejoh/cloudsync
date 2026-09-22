@@ -811,14 +811,26 @@ export class CloudSyncSettingTab extends PluginSettingTab {
       .setName("Account & Server")
       .setHeading();
 
-    // 1. Unified Profile Info Card (Avatar, Name, Handle, Server, Edit & Logout)
-    const profileCard = containerEl.createDiv({ cls: "profile-card" });
-    const profileLeft = profileCard.createDiv({ cls: "profile-card-left" });
-
-    const avatarWrapper = profileLeft.createDiv({ cls: "profile-card-avatar" });
+    // 1. Unified Profile Info Card (Native Obsidian Setting)
     const effectiveName = cs.displayName || cs.username || (cs.mode === "single" ? "Personal Worker" : "User");
     const initial = (effectiveName || "U").charAt(0).toUpperCase();
 
+    let serverHost = "";
+    try {
+      if (cs.serverUrl) serverHost = new URL(cs.serverUrl).host;
+    } catch {}
+
+    const metaParts: string[] = [];
+    if (cs.username) metaParts.push(`@${cs.username}`);
+    if (serverHost) metaParts.push(serverHost);
+
+    const profileSetting = new Setting(containerEl)
+      .setName(effectiveName)
+      .setDesc(metaParts.join(" • "));
+
+    profileSetting.settingEl.addClass("profile-setting-item");
+
+    const avatarWrapper = profileSetting.infoEl.createDiv({ cls: "profile-setting-avatar" });
     if (cs.serverUrl && cs.username) {
       const avatarImg = avatarWrapper.createEl("img", {
         attr: {
@@ -827,7 +839,7 @@ export class CloudSyncSettingTab extends PluginSettingTab {
         },
       });
       const fallbackSpan = avatarWrapper.createSpan({
-        cls: "profile-card-avatar-fallback",
+        cls: "profile-setting-avatar-fallback",
         text: initial,
       });
       fallbackSpan.style.display = "none";
@@ -842,67 +854,53 @@ export class CloudSyncSettingTab extends PluginSettingTab {
       };
     } else {
       avatarWrapper.createSpan({
-        cls: "profile-card-avatar-fallback",
+        cls: "profile-setting-avatar-fallback",
         text: initial,
       });
     }
 
-    const profileInfo = profileLeft.createDiv({ cls: "profile-card-info" });
-    profileInfo.createEl("div", {
-      cls: "profile-card-name",
-      text: effectiveName,
-    });
+    const detailsWrapper = profileSetting.infoEl.createDiv({ cls: "profile-setting-details" });
+    detailsWrapper.appendChild(profileSetting.nameEl);
+    detailsWrapper.appendChild(profileSetting.descEl);
 
-    let serverHost = "";
-    try {
-      if (cs.serverUrl) serverHost = new URL(cs.serverUrl).host;
-    } catch {}
-
-    const metaParts = [];
-    if (cs.username) metaParts.push(`@${cs.username}`);
-    if (serverHost) metaParts.push(serverHost);
-
-    profileInfo.createEl("div", {
-      cls: "profile-card-meta",
-      text: metaParts.join(" • "),
-    });
-
-    const profileActions = profileCard.createDiv({ cls: "profile-card-actions" });
+    profileSetting.infoEl.addClass("profile-setting-info");
+    profileSetting.infoEl.prepend(avatarWrapper);
 
     if (cs.username) {
-      const editBtn = profileActions.createEl("button", {
-        cls: "profile-card-btn",
-        text: "Edit profile",
+      profileSetting.addButton((btn) => {
+        btn
+          .setButtonText("Edit profile")
+          .onClick(() => {
+            new EditProfileModal(this.app, this.plugin, () => this.display()).open();
+          });
       });
-      editBtn.onclick = () => {
-        new EditProfileModal(this.app, this.plugin, () => this.display()).open();
-      };
     }
 
-    const logoutBtn = profileActions.createEl("button", {
-      cls: "profile-card-btn mod-destructive",
-      text: "Log out",
+    profileSetting.addButton((btn) => {
+      btn
+        .setButtonText("Log out")
+        .setClass("mod-warning")
+        .onClick(async () => {
+          if (!confirm("Are you sure you want to log out on this device?")) {
+            return;
+          }
+          cs.token = "";
+          cs.username = "";
+          cs.displayName = "";
+          cs.email = "";
+          cs.encryptionKey = "";
+          cs.vaultId = "";
+          this.plugin.settings.password = "";
+          await this.plugin.saveSettings();
+          try {
+            await destroyDBs();
+          } catch (e) {
+            console.warn("Logout db destroy skipped:", e);
+          }
+          new Notice("Logged out.");
+          this.display();
+        });
     });
-    logoutBtn.onclick = async () => {
-      if (!confirm("Are you sure you want to log out on this device?")) {
-        return;
-      }
-      cs.token = "";
-      cs.username = "";
-      cs.displayName = "";
-      cs.email = "";
-      cs.encryptionKey = "";
-      cs.vaultId = "";
-      this.plugin.settings.password = "";
-      await this.plugin.saveSettings();
-      try {
-        await destroyDBs();
-      } catch (e) {
-        console.warn("Logout db destroy skipped:", e);
-      }
-      new Notice("Logged out.");
-      this.display();
-    };
 
     if (this.storageUsedBytes !== null) {
       const mb = (this.storageUsedBytes / (1024 * 1024)).toFixed(2);
