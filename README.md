@@ -2,7 +2,7 @@
 
 Fast, zero-knowledge encrypted sync for Obsidian. Powered by Cloudflare Workers & R2 or self-hosted VPS.
 
-CloudSync is an independent, lightweight sync plugin for Obsidian. It provides client-side zero-knowledge encryption, debounced fast sync, version history, cloud trash, and multi-device support without third-party vendor lock-in.
+CloudSync is an independent sync plugin for Obsidian, originally forked from [remotely-save](https://github.com/fyears/remotely-save). It provides client-side zero-knowledge encryption, debounced fast sync, version history, cloud trash, and multi-device support without third-party vendor lock-in.
 
 ---
 
@@ -67,6 +67,10 @@ Server runs on port `3000` with data stored in `./data`.
 - `Backup device settings`: Back up settings, plugins, and themes
 
 ---
+
+## Credits
+
+CloudSync was originally forked from [remotely-save](https://github.com/fyears/remotely-save) by [fyears](https://github.com/fyears). While the architecture has evolved with dedicated Cloudflare Worker / VPS backends, client-side zero-knowledge encryption, and a modernized sync engine, credit goes to fyears and the original contributors for laying the groundwork.
 
 ---
 
