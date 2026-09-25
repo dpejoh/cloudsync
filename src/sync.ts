@@ -1999,21 +1999,30 @@ export async function syncer(
     console.error("CloudSync syncer error caught:", error);
     profiler?.insert("start error branch");
     everythingOk = false;
-    await errNotifyFunc?.(triggerSource, error as Error);
-
+    try {
+      await errNotifyFunc?.(triggerSource, error as Error);
+    } catch (e) {
+      console.warn("CloudSync errNotifyFunc failed:", e);
+    }
     profiler?.insert("finish error branch");
   } finally {
+    profiler?.insert("finish syncRun");
+    try {
+      await profiler?.save(db, vaultRandomID, settings.serviceType);
+    } catch (saveErr) {
+      console.warn("CloudSync profiler save skipped:", saveErr);
+    }
+
+    step = 8;
+    try {
+      await notifyFunc?.(triggerSource, step);
+      await ribboonFunc?.(triggerSource, step);
+      await statusBarFunc?.(triggerSource, step, everythingOk);
+    } catch (uiErr) {
+      console.warn("CloudSync status UI update failed:", uiErr);
+    }
+
+    console.info("ending sync.");
+    markIsSyncingFunc(false);
   }
-
-  profiler?.insert("finish syncRun");
-  // console.debug(profiler?.toString());
-  await profiler?.save(db, vaultRandomID, settings.serviceType);
-
-  step = 8;
-  await notifyFunc?.(triggerSource, step);
-  await ribboonFunc?.(triggerSource, step);
-  await statusBarFunc?.(triggerSource, step, everythingOk);
-
-  console.info(`ending sync.`);
-  markIsSyncingFunc(false);
 }

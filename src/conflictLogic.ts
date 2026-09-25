@@ -163,17 +163,22 @@ export async function tryDuplicateFile(
   let key2 = getFileRenameForDup(key);
   let usable = false;
   do {
+    let localExists = false;
+    let remoteExists = false;
     try {
       const s = await fsLocal.stat(key2);
-      if (s === null || s === undefined) {
-        throw Error(`not exist $${key2}`);
-      }
-      console.debug(`key2=${key2} exists, cannot use for new file`);
+      if (s !== null && s !== undefined) localExists = true;
+    } catch {}
+
+    try {
+      const s = await fsRemote.stat(key2);
+      if (s !== null && s !== undefined) remoteExists = true;
+    } catch {}
+
+    if (localExists || remoteExists) {
+      console.debug(`key2=${key2} exists (local=${localExists}, remote=${remoteExists}), preparing next rename`);
       key2 = getFileRenameForDup(key2);
-      console.debug(`key2=${key2} is prepared for next try`);
-    } catch (e) {
-      // not exists, exactly what we want
-      console.debug(`key2=${key2} doesn't exist, usable for new file`);
+    } else {
       usable = true;
     }
   } while (!usable);

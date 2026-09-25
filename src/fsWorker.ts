@@ -39,6 +39,17 @@ export class FakeFsWorker extends FakeFs {
     this.vaultName = config.vaultId || vaultName;
   }
 
+  get activeVault(): string {
+    return this.config.vaultId || this.vaultName;
+  }
+
+  private handleHttpError(operation: string, status: number, text?: string): never {
+    if (status === 401) {
+      throw new Error("CloudSync session expired (401 Unauthorized). Please log in again.");
+    }
+    throw new Error(`CloudSync ${operation} failed (${status}): ${text || ""}`);
+  }
+
   private get baseUrl(): string {
     return (this.config.serverUrl || "").replace(/\/+$/, "");
   }
@@ -52,7 +63,7 @@ export class FakeFsWorker extends FakeFs {
   }
 
   private get vaultQuery(): string {
-    const v = encodeURIComponent(this.vaultName);
+    const v = encodeURIComponent(this.activeVault);
     if (
       this.config.vaultOwner &&
       this.config.vaultOwner.toLowerCase() !==
@@ -72,10 +83,11 @@ export class FakeFsWorker extends FakeFs {
       url,
       method: "GET",
       headers: this.headers,
+      throw: false,
     });
 
     if (res.status !== 200) {
-      throw new Error(`CloudSync walk failed (${res.status}): ${res.text}`);
+      this.handleHttpError("walk", res.status, res.text);
     }
 
     const json = res.json;
@@ -102,7 +114,7 @@ export class FakeFsWorker extends FakeFs {
       throw new Error(`File not found: ${key}`);
     }
     if (res.status !== 200) {
-      throw new Error(`CloudSync stat failed (${res.status})`);
+      this.handleHttpError("stat", res.status, res.text);
     }
 
     const mtime = Number.parseInt(res.headers["x-mtime"] || "0", 10);
@@ -137,10 +149,11 @@ export class FakeFsWorker extends FakeFs {
         "content-type": "application/x-directory",
       },
       body: new ArrayBuffer(0),
+      throw: false,
     });
 
     if (res.status !== 200 && res.status !== 201) {
-      throw new Error(`CloudSync mkdir failed (${res.status}): ${res.text}`);
+      this.handleHttpError("mkdir", res.status, res.text);
     }
 
     return {
@@ -179,10 +192,11 @@ export class FakeFsWorker extends FakeFs {
       method: "PUT",
       headers,
       body: content,
+      throw: false,
     });
 
     if (res.status !== 200 && res.status !== 201) {
-      throw new Error(`CloudSync writeFile failed (${res.status}): ${res.text}`);
+      this.handleHttpError("writeFile", res.status, res.text);
     }
 
     const json = res.json;
@@ -208,10 +222,11 @@ export class FakeFsWorker extends FakeFs {
       url,
       method: "GET",
       headers: this.headers,
+      throw: false,
     });
 
     if (res.status !== 200) {
-      throw new Error(`CloudSync readFile failed (${res.status}): ${res.text}`);
+      this.handleHttpError("readFile", res.status, res.text);
     }
 
     return res.arrayBuffer;
@@ -228,10 +243,11 @@ export class FakeFsWorker extends FakeFs {
         "content-type": "application/json",
       },
       body: JSON.stringify({ from: key1, to: key2 }),
+      throw: false,
     });
 
     if (res.status !== 200) {
-      throw new Error(`CloudSync rename failed (${res.status}): ${res.text}`);
+      this.handleHttpError("rename", res.status, res.text);
     }
 
     if (res.json?.revision !== undefined) {
@@ -250,7 +266,7 @@ export class FakeFsWorker extends FakeFs {
     });
 
     if (res.status !== 200 && res.status !== 404) {
-      throw new Error(`CloudSync rm failed (${res.status}): ${res.text}`);
+      this.handleHttpError("rm", res.status, res.text);
     }
 
     if (res.json?.revision !== undefined) {
@@ -272,7 +288,7 @@ export class FakeFsWorker extends FakeFs {
     });
 
     if (res.status !== 200) {
-      throw new Error(`CloudSync getChanges failed (${res.status}): ${res.text}`);
+      this.handleHttpError("getChanges", res.status, res.text);
     }
 
     const data = res.json as VaultChangesResponse;
@@ -281,6 +297,7 @@ export class FakeFsWorker extends FakeFs {
     }
     return data;
   }
+
 
   async updateCursor(
     key: string,

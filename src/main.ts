@@ -150,7 +150,15 @@ export default class CloudSyncPlugin extends Plugin {
   appContainerObserver?: MutationObserver;
 
   cachedFsLocal?: FakeFsLocal;
+  cachedFsLocalSyncConfigDir?: boolean;
+  cachedFsLocalDeleteToWhere?: string;
+
   cachedFsRemote?: FakeFsWorker;
+  cachedRemoteVaultId?: string;
+  cachedRemoteServerUrl?: string;
+  cachedRemoteToken?: string;
+  cachedRemoteOwner?: string;
+
   cachedFsEncrypt?: FakeFsEncrypt;
   cachedFsEncryptPassword?: string;
   cachedFsEncryptMethod?: string;
@@ -188,14 +196,47 @@ export default class CloudSyncPlugin extends Plugin {
     }
   }
 
+  clearCachedClients() {
+    if (this.cachedFsEncrypt) {
+      try {
+        this.cachedFsEncrypt.closeResources();
+      } catch {}
+    }
+    this.cachedFsLocal = undefined;
+    this.cachedFsLocalSyncConfigDir = undefined;
+    this.cachedFsLocalDeleteToWhere = undefined;
+
+    this.cachedFsRemote = undefined;
+    this.cachedRemoteVaultId = undefined;
+    this.cachedRemoteServerUrl = undefined;
+    this.cachedRemoteToken = undefined;
+    this.cachedRemoteOwner = undefined;
+
+    this.cachedFsEncrypt = undefined;
+    this.cachedFsEncryptPassword = undefined;
+    this.cachedFsEncryptMethod = undefined;
+  }
+
   getOrCreateClients() {
     const vaultName = this.app.vault.getName();
     const profileID = this.getCurrProfileID();
+    const cs = this.settings.cloudsync;
 
     const syncConfigDir =
       (this.settings.settingsSyncMode ?? "notes_only") === "shared";
+    const deleteToWhere = this.settings.deleteToWhere ?? "system";
+
+    if (
+      this.cachedFsLocal &&
+      (this.cachedFsLocalSyncConfigDir !== syncConfigDir ||
+        this.cachedFsLocalDeleteToWhere !== deleteToWhere)
+    ) {
+      this.cachedFsLocal = undefined;
+    }
 
     if (!this.cachedFsLocal) {
+      this.cachedFsLocalSyncConfigDir = syncConfigDir;
+      this.cachedFsLocalDeleteToWhere = deleteToWhere;
       this.cachedFsLocal = new FakeFsLocal(
         this.app.vault,
         syncConfigDir,
@@ -203,13 +244,33 @@ export default class CloudSyncPlugin extends Plugin {
         this.app.vault.configDir,
         this.manifest.id,
         undefined,
-        this.settings.deleteToWhere ?? "system"
+        deleteToWhere
       );
     }
 
+    if (
+      this.cachedFsRemote &&
+      (this.cachedRemoteVaultId !== cs.vaultId ||
+        this.cachedRemoteServerUrl !== cs.serverUrl ||
+        this.cachedRemoteToken !== cs.token ||
+        this.cachedRemoteOwner !== cs.vaultOwner)
+    ) {
+      this.cachedFsRemote = undefined;
+      if (this.cachedFsEncrypt) {
+        try {
+          this.cachedFsEncrypt.closeResources();
+        } catch {}
+        this.cachedFsEncrypt = undefined;
+      }
+    }
+
     if (!this.cachedFsRemote) {
+      this.cachedRemoteVaultId = cs.vaultId;
+      this.cachedRemoteServerUrl = cs.serverUrl;
+      this.cachedRemoteToken = cs.token;
+      this.cachedRemoteOwner = cs.vaultOwner;
       this.cachedFsRemote = new FakeFsWorker(
-        this.settings.cloudsync,
+        cs,
         vaultName
       );
     }
@@ -220,7 +281,9 @@ export default class CloudSyncPlugin extends Plugin {
       this.cachedFsEncryptMethod !== this.settings.encryptionMethod
     ) {
       if (this.cachedFsEncrypt) {
-        this.cachedFsEncrypt.closeResources();
+        try {
+          this.cachedFsEncrypt.closeResources();
+        } catch {}
       }
       this.cachedFsEncryptPassword = this.settings.password;
       this.cachedFsEncryptMethod =
@@ -436,11 +499,20 @@ export default class CloudSyncPlugin extends Plugin {
     };
 
     const errNotifyFunc = async (s: SyncTriggerSourceType, err: any) => {
+      const errMsg = err?.message || `${err}`;
+      const isAuthError = errMsg.includes("401") || errMsg.includes("Unauthorized");
       this.addSyncLog({
         type: "error",
-        message: `Sync error: ${err?.message || err}`,
+        message: isAuthError
+          ? "CloudSync session expired. Please log in again from Settings."
+          : `Sync error: ${errMsg}`,
       });
-      new Notice(`Sync error: ${err?.message || err}`);
+      new Notice(
+        isAuthError
+          ? "CloudSync session expired. Please log in again from Settings."
+          : `Sync error: ${errMsg}`,
+        isAuthError ? 8000 : 5000
+      );
     };
 
     const ribboonFunc = async (s: SyncTriggerSourceType, step: number) => {
@@ -997,7 +1069,16 @@ export default class CloudSyncPlugin extends Plugin {
           this.lastKnownRevision
         );
       }
-    } catch {}
+    } catch (err: any) {
+      const errMsg = err?.message || `${err}`;
+      if (errMsg.includes("401") || errMsg.includes("Unauthorized")) {
+        console.warn("CloudSync: Session expired during live pulse, pausing background pulse.");
+        if (this.livePulseTimeoutID) {
+          window.clearTimeout(this.livePulseTimeoutID);
+          this.livePulseTimeoutID = undefined;
+        }
+      }
+    }
   }
 
   applyRemoteCursor(path: string, cursor: { line: number; ch: number }) {
@@ -1091,6 +1172,7 @@ export default class CloudSyncPlugin extends Plugin {
       }
     } catch (err: any) {
       console.error("CloudSync: Fast pull error, falling back to full sync:", err);
+      this.isFastSyncing = false;
       await this.syncRun("auto");
     } finally {
       this.isFastSyncing = false;
@@ -1188,7 +1270,8 @@ export default class CloudSyncPlugin extends Plugin {
               this.vaultRandomID,
               profileID,
               this.settings,
-              cursor
+              cursor,
+              this.app.vault.configDir
             );
             this.addSyncLog({
               type: "success",
@@ -1225,6 +1308,7 @@ export default class CloudSyncPlugin extends Plugin {
       }
     } catch (err: any) {
       console.error("CloudSync: Fast push error, falling back to full sync:", err);
+      this.isFastSyncing = false;
       await this.syncRun("auto_sync_on_save");
     } finally {
       this.isFastSyncing = false;
