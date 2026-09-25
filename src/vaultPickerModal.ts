@@ -180,6 +180,7 @@ export class VaultPickerModal extends Modal {
 
               cs.vaultId = "";
               cs.vaultOwner = "";
+              this.plugin.clearCachedClients();
               await this.plugin.saveSettings();
               new Notice(`Disconnected from remote vault "${v.name}".`);
               this.onVaultChanged?.("");
@@ -278,6 +279,7 @@ export class VaultPickerModal extends Modal {
     }
 
     this.plugin.lastKnownRevision = 0;
+    this.plugin.clearCachedClients();
     await this.plugin.saveSettings();
 
     new Notice(`Connected to remote vault "${vaultName}".`);
@@ -307,6 +309,7 @@ export class VaultPickerModal extends Modal {
         new Notice(`Deleted remote vault "${vaultName}".`);
         if (cs.vaultId === vaultName) {
           cs.vaultId = "";
+          this.plugin.clearCachedClients();
           await this.plugin.saveSettings();
           this.onVaultChanged?.("");
         }

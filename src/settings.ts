@@ -891,6 +891,7 @@ export class CloudSyncSettingTab extends PluginSettingTab {
           cs.encryptionKey = "";
           cs.vaultId = "";
           this.plugin.settings.password = "";
+          this.plugin.clearCachedClients();
           await this.plugin.saveSettings();
           try {
             await destroyDBs();
@@ -1025,6 +1026,7 @@ export class CloudSyncSettingTab extends PluginSettingTab {
               const disconnectedVault = cs.vaultId;
               cs.vaultId = "";
               cs.vaultOwner = "";
+              this.plugin.clearCachedClients();
               await this.plugin.saveSettings();
               new Notice(`Disconnected from remote vault "${disconnectedVault}".`);
               this.display();

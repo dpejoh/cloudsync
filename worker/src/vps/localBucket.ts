@@ -106,8 +106,9 @@ export class LocalDiskBucket {
   private getFilePath(key: string): string {
     // Sanitize path against directory traversal
     const safeKey = path.normalize(key).replace(/^(\.\.(\/|\\|$))+/, "");
-    const filePath = path.join(this.storageDir, safeKey);
-    if (!filePath.startsWith(this.storageDir)) {
+    const filePath = path.resolve(this.storageDir, safeKey);
+    const rel = path.relative(this.storageDir, filePath);
+    if (rel.startsWith("..") || path.isAbsolute(rel) || rel === "") {
       throw new Error(`Invalid storage path traversal attempt: ${key}`);
     }
     return filePath;

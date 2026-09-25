@@ -30,13 +30,19 @@ export async function fastPushPath(
   vaultRandomID: string,
   profileID: string,
   settings: RemotelySavePluginSettings,
-  cursor?: { line: number; ch: number }
+  cursor?: { line: number; ch: number },
+  configDir?: string
 ): Promise<boolean> {
   const isNotesOnly = (settings.settingsSyncMode ?? "notes_only") !== "shared";
+  const cfgDir = configDir || ".obsidian";
   if (
     path.startsWith(DEFAULT_DEBUG_FOLDER) ||
     path.startsWith(DEFAULT_DEVICE_CONFIGS_FOLDER) ||
-    (isNotesOnly && (path.startsWith(".obsidian/") || path === ".obsidian"))
+    (isNotesOnly &&
+      (path.startsWith(".obsidian/") ||
+        path.startsWith(`${cfgDir}/`) ||
+        path === ".obsidian" ||
+        path === cfgDir))
   ) {
     return false;
   }
