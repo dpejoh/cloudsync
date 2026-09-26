@@ -28,6 +28,8 @@ esbuild
     external: [
       "obsidian",
       "electron",
+      "@codemirror/state",
+      "@codemirror/view",
       "fs",
       "tls",
       "net",
