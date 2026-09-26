@@ -1126,3 +1126,102 @@ input[type="text"].otp-square.is-filled {
   border: 1px dashed var(--background-modifier-border);
   margin-top: 12px;
 }
+
+/* Remote Cursor Presence */
+.cloudsync-remote-cursor-wrap {
+  display: inline-block;
+  position: relative;
+  width: 0;
+  height: 0;
+  vertical-align: text-bottom;
+  pointer-events: auto;
+  user-select: none;
+}
+
+/* Touch and hover hit area */
+.cloudsync-remote-cursor-wrap::before {
+  content: "";
+  position: absolute;
+  top: -8px;
+  bottom: -8px;
+  left: -8px;
+  width: 18px;
+  pointer-events: auto;
+  cursor: pointer;
+  z-index: 45;
+}
+
+.cloudsync-remote-cursor-bar {
+  position: absolute;
+  bottom: -2px;
+  left: -1px;
+  width: 2px;
+  height: 1.25em;
+  border-radius: 1px;
+  pointer-events: auto;
+  user-select: none;
+  z-index: 50;
+  transition: transform 0.15s ease, opacity 0.15s ease;
+  cursor: pointer;
+}
+
+.cloudsync-remote-cursor-wrap:hover .cloudsync-remote-cursor-bar,
+.cloudsync-remote-cursor-wrap.cloudsync-flag-revealed .cloudsync-remote-cursor-bar {
+  transform: scaleX(1.5);
+}
+
+.cloudsync-remote-cursor-flag {
+  position: absolute;
+  bottom: calc(100% + 3px);
+  left: -2px;
+  color: #ffffff;
+  font-size: 10px;
+  font-weight: 600;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  padding: 1px 6px;
+  border-radius: 3px;
+  white-space: nowrap;
+  line-height: 1.25;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+  user-select: none;
+  z-index: 9999;
+  opacity: 0;
+  transform: translateY(3px) scale(0.95);
+  transition: opacity 0.2s ease-out, transform 0.2s ease-out;
+}
+
+.cloudsync-remote-cursor-wrap:hover .cloudsync-remote-cursor-flag,
+.cloudsync-remote-cursor-wrap.cloudsync-flag-revealed .cloudsync-remote-cursor-flag {
+  animation: none;
+  opacity: 1;
+  transform: translateY(-2px) scale(1);
+  pointer-events: auto;
+  transition: opacity 0.18s ease-in-out, transform 0.18s ease-in-out;
+}
+
+/* Entrance animation */
+.cloudsync-remote-cursor-flag.cloudsync-initial-arrival {
+  animation: cloudsync-badge-dwell-fade 3.0s ease-out forwards;
+}
+
+@keyframes cloudsync-badge-dwell-fade {
+  0% {
+    opacity: 0;
+    transform: translateY(3px) scale(0.95);
+  }
+  10% {
+    opacity: 1;
+    transform: translateY(-2px) scale(1);
+  }
+  75% {
+    opacity: 1;
+    transform: translateY(-2px) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(3px) scale(0.95);
+    pointer-events: none;
+  }
+}
+
