@@ -21,6 +21,8 @@ export interface CloudSyncConfig {
   autoSyncIntervalMinutes?: number;
   syncOnStartup?: boolean;
   syncOnSave?: boolean;
+  deviceId?: string;
+  deviceName?: string;
 }
 
 export const DEFAULT_CLOUDSYNC_CONFIG: CloudSyncConfig = {

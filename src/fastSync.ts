@@ -114,6 +114,8 @@ export async function fastPullChange(
   action: "pulled" | "deleted" | "cursor" | "skipped";
   path: string;
   cursor?: { line: number; ch: number };
+  deviceId?: string;
+  deviceName?: string;
 }> {
   const plainKey = await fsEncrypt.decryptRemoteKey(change.key);
 
@@ -121,7 +123,13 @@ export async function fastPullChange(
     plainKey.startsWith(DEFAULT_DEBUG_FOLDER) ||
     plainKey.startsWith(DEFAULT_DEVICE_CONFIGS_FOLDER)
   ) {
-    return { action: "skipped", path: plainKey, cursor: change.cursor };
+    return {
+      action: "skipped",
+      path: plainKey,
+      cursor: change.cursor,
+      deviceId: change.deviceId,
+      deviceName: change.deviceName,
+    };
   }
 
   const isNotesOnly = (settings?.settingsSyncMode ?? "notes_only") !== "shared";
@@ -133,11 +141,23 @@ export async function fastPullChange(
       plainKey === ".obsidian" ||
       plainKey === cfgDir)
   ) {
-    return { action: "skipped", path: plainKey, cursor: change.cursor };
+    return {
+      action: "skipped",
+      path: plainKey,
+      cursor: change.cursor,
+      deviceId: change.deviceId,
+      deviceName: change.deviceName,
+    };
   }
 
   if (change.action === "cursor") {
-    return { action: "cursor", path: plainKey, cursor: change.cursor };
+    return {
+      action: "cursor",
+      path: plainKey,
+      cursor: change.cursor,
+      deviceId: change.deviceId,
+      deviceName: change.deviceName,
+    };
   }
 
   if (change.action === "put") {
@@ -150,10 +170,22 @@ export async function fastPullChange(
 
     if (localStat !== null && localStat.mtimeCli !== undefined) {
       if (isMTimeEqual(localStat.mtimeCli, change.mtime, 1500)) {
-        return { action: "skipped", path: plainKey, cursor: change.cursor };
+        return {
+          action: "skipped",
+          path: plainKey,
+          cursor: change.cursor,
+          deviceId: change.deviceId,
+          deviceName: change.deviceName,
+        };
       }
       if (localStat.mtimeCli > change.mtime + 1500) {
-        return { action: "skipped", path: plainKey, cursor: change.cursor };
+        return {
+          action: "skipped",
+          path: plainKey,
+          cursor: change.cursor,
+          deviceId: change.deviceId,
+          deviceName: change.deviceName,
+        };
       }
     }
 
@@ -171,7 +203,13 @@ export async function fastPullChange(
       profileID,
       entity
     );
-    return { action: "pulled", path: plainKey, cursor: change.cursor };
+    return {
+      action: "pulled",
+      path: plainKey,
+      cursor: change.cursor,
+      deviceId: change.deviceId,
+      deviceName: change.deviceName,
+    };
   } else if (change.action === "delete") {
     let localExists = false;
     try {
