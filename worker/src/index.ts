@@ -21,6 +21,17 @@ interface VaultChange {
   mtime: number;
   size?: number;
   cursor?: { line: number; ch: number };
+  deviceId?: string;
+  deviceName?: string;
+}
+
+interface CachedCursor {
+  key: string;
+  cursor: { line: number; ch: number };
+  deviceId: string;
+  deviceName: string;
+  rev: number;
+  timestamp: number;
 }
 
 interface DeviceInfo {
@@ -34,8 +45,10 @@ interface DeviceInfo {
 
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
-// In-memory caches for ephemeral cursor updates and storage calculations
-const cursorCache = new Map<string, { key: string; cursor: { line: number; ch: number }; rev: number }>();
+// In-memory caches for multi-device cursor updates and storage calculations
+// vaultKey -> Map<deviceId, CachedCursor>
+const CURSOR_TTL_MS = 30000; // 30-second TTL for active cursor presence
+const cursorCache = new Map<string, Map<string, CachedCursor>>();
 const storageCache = new Map<string, { bytes: number; timestamp: number }>();
 
 app.use("*", async (c, next) => {
@@ -63,6 +76,8 @@ app.use(
       "x-vault-id",
       "x-cursor-line",
       "x-cursor-ch",
+      "x-device-id",
+      "x-device-name",
     ],
     exposeHeaders: [
       "Content-Length",
@@ -70,6 +85,8 @@ app.use(
       "x-ctime",
       "x-cursor-line",
       "x-cursor-ch",
+      "x-device-id",
+      "x-device-name",
       "ETag",
     ],
   })
@@ -380,26 +397,40 @@ async function recordVaultChange(
   action: "put" | "delete" | "cursor",
   mtime: number,
   size?: number,
-  cursor?: { line: number; ch: number }
+  cursor?: { line: number; ch: number },
+  device?: { deviceId: string; deviceName: string }
 ): Promise<number> {
   const rev = getNextRevision();
   const vaultKey = `${userId}:${vault}`;
 
-  // Keep cursor presence in memory to avoid storage writes
-  if (action === "cursor" && cursor) {
-    cursorCache.set(vaultKey, { key, cursor, rev });
-    return rev;
-  }
-  if (cursor) {
-    cursorCache.set(vaultKey, { key, cursor, rev });
+  // Keep in-memory cache updated for fast local isolate lookups
+  if (cursor && device?.deviceId) {
+    let devMap = cursorCache.get(vaultKey);
+    if (!devMap) {
+      devMap = new Map();
+      cursorCache.set(vaultKey, devMap);
+    }
+    devMap.set(device.deviceId, {
+      key,
+      cursor,
+      deviceId: device.deviceId,
+      deviceName: device.deviceName || "Remote Device",
+      rev,
+      timestamp: Date.now(),
+    });
   }
 
   const metaKey = `users/${userId}/vaults/${vault}/.cloudsync_meta.json`;
 
   try {
-    let meta: { revision: number; changes: VaultChange[] } = {
+    let meta: {
+      revision: number;
+      changes: VaultChange[];
+      presences?: Record<string, CachedCursor>;
+    } = {
       revision: rev,
       changes: [],
+      presences: {},
     };
 
     const existing = await env.CLOUDSYNC_BUCKET.get(metaKey);
@@ -409,11 +440,45 @@ async function recordVaultChange(
         if (parsed?.changes && Array.isArray(parsed.changes)) {
           meta.changes = parsed.changes;
         }
+        if (parsed?.presences && typeof parsed.presences === "object") {
+          meta.presences = parsed.presences;
+        }
       } catch {}
     }
 
+    if (!meta.presences) {
+      meta.presences = {};
+    }
+
+    const now = Date.now();
+    for (const [devId, item] of Object.entries(meta.presences)) {
+      if (now - item.timestamp > CURSOR_TTL_MS) {
+        delete meta.presences[devId];
+      }
+    }
+
+    if (cursor && device?.deviceId) {
+      meta.presences[device.deviceId] = {
+        key,
+        cursor,
+        deviceId: device.deviceId,
+        deviceName: device.deviceName || "Remote Device",
+        rev,
+        timestamp: now,
+      };
+    }
+
     meta.revision = rev;
-    meta.changes.unshift({ rev, key, action, mtime, size, cursor });
+    meta.changes.unshift({
+      rev,
+      key,
+      action,
+      mtime,
+      size,
+      cursor,
+      deviceId: device?.deviceId,
+      deviceName: device?.deviceName,
+    });
     if (meta.changes.length > 100) {
       meta.changes = meta.changes.slice(0, 100);
     }
@@ -423,7 +488,9 @@ async function recordVaultChange(
       customMetadata: { revision: `${rev}` },
     });
 
-    storageCache.delete(userId);
+    if (action !== "cursor") {
+      storageCache.delete(userId);
+    }
   } catch (err) {
     console.error("Failed to record vault change:", err);
   }
@@ -1310,6 +1377,7 @@ app.get("/api/sync/changes", async (c) => {
 
   let latestRev = 0;
   let allChanges: VaultChange[] = [];
+  let metaPresences: Record<string, CachedCursor> = {};
 
   try {
     const metaObj = await c.env.CLOUDSYNC_BUCKET.get(`users/${ownerId}/vaults/${targetVault}/.cloudsync_meta.json`);
@@ -1317,29 +1385,86 @@ app.get("/api/sync/changes", async (c) => {
       const meta = (await metaObj.json()) as any;
       latestRev = meta?.revision || 0;
       allChanges = Array.isArray(meta?.changes) ? meta.changes : [];
+      if (meta?.presences && typeof meta.presences === "object") {
+        metaPresences = meta.presences;
+      }
     }
   } catch {}
 
-  const memCursor = cursorCache.get(vaultKey);
-  const memCursorMatches = memCursor && memCursor.rev > since;
+  const callerDeviceId = c.req.header("x-device-id") || "";
+  const cursorChanges: VaultChange[] = [];
+  let maxCursorRev = 0;
+  const now = Date.now();
 
-  if (since > 0 && latestRev <= since && !memCursorMatches) {
-    return c.json({ ok: true, revision: latestRev, fullScanNeeded: false, changes: [] });
+  for (const [devId, item] of Object.entries(metaPresences)) {
+    if (now - item.timestamp > CURSOR_TTL_MS) {
+      continue;
+    }
+    if (callerDeviceId && devId === callerDeviceId) {
+      continue;
+    }
+    if (item.rev > maxCursorRev) {
+      maxCursorRev = item.rev;
+    }
+    cursorChanges.push({
+      rev: item.rev,
+      key: item.key,
+      action: "cursor",
+      mtime: item.timestamp,
+      cursor: item.cursor,
+      deviceId: item.deviceId,
+      deviceName: item.deviceName,
+    });
+  }
+
+  const devMap = cursorCache.get(vaultKey);
+  if (devMap) {
+    for (const [devId, item] of devMap.entries()) {
+      if (now - item.timestamp > CURSOR_TTL_MS) {
+        devMap.delete(devId);
+        continue;
+      }
+      if (callerDeviceId && devId === callerDeviceId) {
+        continue;
+      }
+      if (!cursorChanges.some((c) => c.deviceId === devId)) {
+        if (item.rev > maxCursorRev) {
+          maxCursorRev = item.rev;
+        }
+        cursorChanges.push({
+          rev: item.rev,
+          key: item.key,
+          action: "cursor",
+          mtime: item.timestamp,
+          cursor: item.cursor,
+          deviceId: item.deviceId,
+          deviceName: item.deviceName,
+        });
+      }
+    }
+    if (devMap.size === 0) {
+      cursorCache.delete(vaultKey);
+    }
+  }
+
+  if (since > 0 && latestRev <= since && cursorChanges.length === 0) {
+    return c.json({ ok: true, revision: Math.max(latestRev, maxCursorRev), fullScanNeeded: false, changes: [] });
   }
 
   let changes = since > 0 ? allChanges.filter((ch) => ch.rev > since) : allChanges;
 
-  if (memCursorMatches && memCursor) {
-    changes = [
-      {
-        rev: memCursor.rev,
-        key: memCursor.key,
-        action: "cursor",
-        mtime: memCursor.rev,
-        cursor: memCursor.cursor,
-      },
-      ...changes,
-    ];
+  if (callerDeviceId) {
+    changes = changes.filter(
+      (ch) => ch.action !== "cursor" || ch.deviceId !== callerDeviceId
+    );
+  }
+
+  if (cursorChanges.length > 0) {
+    const cursorDevIds = new Set(cursorChanges.map((c) => c.deviceId));
+    changes = changes.filter(
+      (ch) => ch.action !== "cursor" || !cursorDevIds.has(ch.deviceId)
+    );
+    changes = [...cursorChanges, ...changes];
   }
 
   const oldestInRing = allChanges.length > 0 ? allChanges[allChanges.length - 1].rev : 0;
@@ -1347,7 +1472,7 @@ app.get("/api/sync/changes", async (c) => {
 
   return c.json({
     ok: true,
-    revision: Math.max(latestRev, memCursor?.rev || 0),
+    revision: Math.max(latestRev, maxCursorRev),
     fullScanNeeded,
     changes,
   });
@@ -1439,10 +1564,14 @@ app.put("/api/sync/file", async (c) => {
 
   const cursorLine = c.req.header("x-cursor-line");
   const cursorCh = c.req.header("x-cursor-ch");
+  const deviceId = c.req.header("x-device-id");
+  const rawDevName = c.req.header("x-device-name");
+  const deviceName = rawDevName ? decodeURIComponent(rawDevName) : undefined;
   const cursor =
     cursorLine !== undefined && cursorCh !== undefined
       ? { line: Number.parseInt(cursorLine, 10), ch: Number.parseInt(cursorCh, 10) }
       : undefined;
+  const device = deviceId ? { deviceId, deviceName: deviceName || "Remote Device" } : undefined;
 
   const rev = await recordVaultChange(
     c.env,
@@ -1452,7 +1581,8 @@ app.put("/api/sync/file", async (c) => {
     "put",
     Number.parseInt(mtime, 10),
     body.byteLength,
-    cursor
+    cursor,
+    device
   );
 
   return c.json({
@@ -1471,6 +1601,9 @@ app.put("/api/sync/cursor", async (c) => {
   const key = c.req.query("key") || "";
   const lineStr = c.req.header("x-cursor-line");
   const chStr = c.req.header("x-cursor-ch");
+  const deviceId = c.req.header("x-device-id");
+  const rawDevName = c.req.header("x-device-name");
+  const deviceName = rawDevName ? decodeURIComponent(rawDevName) : undefined;
 
   const res = await resolveVaultTarget(c, vault, owner);
   if (res.error || !res.target) return c.json({ error: res.error }, (res.status || 400) as any);
@@ -1480,7 +1613,65 @@ app.put("/api/sync/cursor", async (c) => {
   const { ownerId, vault: targetVault } = res.target;
 
   const cursor = { line: Number.parseInt(lineStr, 10), ch: Number.parseInt(chStr, 10) };
-  const rev = await recordVaultChange(c.env, ownerId, targetVault, key, "cursor", Date.now(), undefined, cursor);
+  const device = deviceId ? { deviceId, deviceName: deviceName || "Remote Device" } : undefined;
+  const rev = await recordVaultChange(c.env, ownerId, targetVault, key, "cursor", Date.now(), undefined, cursor, device);
+
+  return c.json({ ok: true, revision: rev });
+});
+
+app.delete("/api/sync/cursor", async (c) => {
+  const vault = c.req.query("vault") || "default";
+  const owner = c.req.query("owner");
+  const deviceId = c.req.header("x-device-id");
+
+  const res = await resolveVaultTarget(c, vault, owner);
+  if (res.error || !res.target) return c.json({ error: res.error }, (res.status || 400) as any);
+  if (!deviceId) return c.json({ error: "Missing device ID" }, 400);
+
+  const { ownerId, vault: targetVault } = res.target;
+  const vaultKey = `${ownerId}:${targetVault}`;
+
+  // Remove from local isolate memory
+  const devMap = cursorCache.get(vaultKey);
+  if (devMap) {
+    devMap.delete(deviceId);
+    if (devMap.size === 0) {
+      cursorCache.delete(vaultKey);
+    }
+  }
+
+  // Remove from shared R2 metadata and broadcast leave
+  const metaKey = `users/${ownerId}/vaults/${targetVault}/.cloudsync_meta.json`;
+  const rev = getNextRevision();
+
+  try {
+    const existing = await c.env.CLOUDSYNC_BUCKET.get(metaKey);
+    if (existing) {
+      const meta = (await existing.json()) as any;
+      if (meta?.presences && meta.presences[deviceId]) {
+        delete meta.presences[deviceId];
+      }
+      meta.revision = rev;
+      meta.changes = meta.changes || [];
+      meta.changes.unshift({
+        rev,
+        key: "",
+        action: "cursor",
+        mtime: Date.now(),
+        cursor: undefined,
+        deviceId,
+      });
+      if (meta.changes.length > 100) {
+        meta.changes = meta.changes.slice(0, 100);
+      }
+      await c.env.CLOUDSYNC_BUCKET.put(metaKey, JSON.stringify(meta), {
+        httpMetadata: { contentType: "application/json" },
+        customMetadata: { revision: `${rev}` },
+      });
+    }
+  } catch (err) {
+    console.error("Failed to delete cursor presence:", err);
+  }
 
   return c.json({ ok: true, revision: rev });
 });
