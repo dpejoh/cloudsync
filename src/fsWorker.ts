@@ -9,6 +9,8 @@ export interface VaultChangeItem {
   mtime: number;
   size?: number;
   cursor?: { line: number; ch: number };
+  deviceId?: string;
+  deviceName?: string;
 }
 
 export interface VaultChangesResponse {
@@ -58,6 +60,12 @@ export class FakeFsWorker extends FakeFs {
     const h: Record<string, string> = {};
     if (this.config.token) {
       h["Authorization"] = `Bearer ${this.config.token}`;
+    }
+    if (this.config.deviceId) {
+      h["x-device-id"] = this.config.deviceId;
+    }
+    if (this.config.deviceName) {
+      h["x-device-name"] = encodeURIComponent(this.config.deviceName);
     }
     return h;
   }

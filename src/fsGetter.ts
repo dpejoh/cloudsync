@@ -5,7 +5,11 @@ import { FakeFsWorker } from "./fsWorker";
 export function getClient(
   settings: RemotelySavePluginSettings,
   vaultName: string,
-  saveUpdatedConfigFunc?: () => Promise<any>
 ): FakeFs {
-  return new FakeFsWorker(settings.cloudsync, vaultName);
+  const cfg = {
+    ...settings.cloudsync,
+    deviceId: settings.deviceId,
+    deviceName: settings.deviceName,
+  };
+  return new FakeFsWorker(cfg, vaultName);
 }
