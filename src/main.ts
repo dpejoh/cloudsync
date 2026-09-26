@@ -7,6 +7,7 @@ import {
   Menu,
   Notice,
   Platform,
+  MarkdownView,
   Plugin,
   TFile,
   TFolder,
@@ -42,6 +43,7 @@ import { FakeFsEncrypt } from "./fsEncrypt";
 import { getClient } from "./fsGetter";
 import { FakeFsLocal } from "./fsLocal";
 import { FakeFsWorker, type VaultChangeItem } from "./fsWorker";
+import { PresenceManager } from "./presenceManager";
 import { I18n } from "./i18n";
 import type { LangTypeAndAuto, TransItemType } from "./i18n";
 import { importQrCodeUri } from "./importExport";
@@ -173,9 +175,8 @@ export default class CloudSyncPlugin extends Plugin {
   isFastSyncing = false;
   lastKnownRevision = 0;
 
+  presenceManager!: PresenceManager;
   lastLocalCursor: { path: string; line: number; ch: number } | null = null;
-  cursorDebounceTimer?: number;
-  isApplyingRemoteCursor = false;
 
   syncLogs: SyncLogEntry[] = [];
 
@@ -270,7 +271,11 @@ export default class CloudSyncPlugin extends Plugin {
       this.cachedRemoteToken = cs.token;
       this.cachedRemoteOwner = cs.vaultOwner;
       this.cachedFsRemote = new FakeFsWorker(
-        cs,
+        {
+          ...cs,
+          deviceId: this.settings.deviceId,
+          deviceName: this.settings.deviceName,
+        },
         vaultName
       );
     }
@@ -865,6 +870,21 @@ export default class CloudSyncPlugin extends Plugin {
 
     await this.autoRegisterDevice();
 
+    this.presenceManager = new PresenceManager(this);
+    this.registerEditorExtension(this.presenceManager.getEditorExtensions());
+    this.registerEvent(
+      this.app.workspace.on("active-leaf-change", (leaf) => {
+        const view = leaf?.view;
+        if (!view || !(view instanceof MarkdownView) || !view.file) {
+          if (this.presenceManager) {
+            this.presenceManager.handleLocalLeave();
+          }
+        } else {
+          this.presenceManager.dispatchPresencesToOpenLeaves();
+        }
+      })
+    );
+
     this.enableAutoSyncIfSet();
     this.enableInitSyncIfSet();
     this.toggleSyncOnSaveIfSet();
@@ -879,6 +899,9 @@ export default class CloudSyncPlugin extends Plugin {
   async onunload() {
     console.info(`Unloading plugin ${this.manifest.id}`);
     this.syncRibbon = undefined;
+    if (this.presenceManager) {
+      this.presenceManager.destroy();
+    }
     if (this.autoRunIntervalID) {
       window.clearInterval(this.autoRunIntervalID);
     }
@@ -894,9 +917,6 @@ export default class CloudSyncPlugin extends Plugin {
     }
     if (this.debouncePushTimer) {
       window.clearTimeout(this.debouncePushTimer);
-    }
-    if (this.cursorDebounceTimer) {
-      window.clearTimeout(this.cursorDebounceTimer);
     }
     if (this.cachedFsEncrypt) {
       this.cachedFsEncrypt.closeResources();
@@ -918,20 +938,24 @@ export default class CloudSyncPlugin extends Plugin {
       return;
     }
 
-    // Pause polling while offline, idle, or hidden
+    // Pause polling while offline or app is hidden/minimized
     if (
       (typeof navigator !== "undefined" && !navigator.onLine) ||
-      document.visibilityState !== "visible" ||
-      Date.now() - this.lastUserActivityTime > 120_000
+      (typeof document !== "undefined" && document.visibilityState !== "visible")
     ) {
       return;
     }
 
     const idleMs = Date.now() - this.lastUserActivityTime;
     const isMobile = Platform.isMobileApp;
-    const delay = isMobile
-      ? (idleMs > 30_000 ? 10000 : 5000)
-      : (idleMs > 30_000 ? 5000 : 2000);
+    let delay = 2000;
+    if (idleMs > 120_000) {
+      delay = isMobile ? 12000 : 8000;
+    } else if (idleMs > 30_000) {
+      delay = isMobile ? 6000 : 4000;
+    } else {
+      delay = isMobile ? 3000 : 2000;
+    }
 
     this.livePulseTimeoutID = window.setTimeout(async () => {
       await this.runLivePulse();
@@ -995,12 +1019,9 @@ export default class CloudSyncPlugin extends Plugin {
     const doc = typeof activeDocument !== "undefined" ? activeDocument : window.document;
     const handleCursorMove = () => {
       wakeSync();
-      if (this.isSyncing || this.isFastSyncing || this.isApplyingRemoteCursor) {
+      if (this.isSyncing || this.isFastSyncing) {
         return;
       }
-      const leaves = this.app.workspace.getLeavesOfType("markdown");
-      if (leaves.length === 0) return;
-
       const activeView = this.app.workspace.activeLeaf?.view as any;
       if (!activeView || !activeView.file || !activeView.editor) return;
 
@@ -1008,22 +1029,9 @@ export default class CloudSyncPlugin extends Plugin {
       const path = activeView.file.path;
       if (this.shouldIgnorePath(path)) return;
 
-      if (
-        this.lastLocalCursor &&
-        this.lastLocalCursor.path === path &&
-        this.lastLocalCursor.line === cur.line &&
-        this.lastLocalCursor.ch === cur.ch
-      ) {
-        return;
+      if (this.presenceManager) {
+        this.presenceManager.handleLocalCursor(path, cur);
       }
-
-      this.lastLocalCursor = { path, line: cur.line, ch: cur.ch };
-      if (this.cursorDebounceTimer) {
-        window.clearTimeout(this.cursorDebounceTimer);
-      }
-      this.cursorDebounceTimer = window.setTimeout(async () => {
-        await this.sendCursorUpdate(path, cur);
-      }, 400);
     };
 
     this.registerDomEvent(doc, "keydown", wakeSync);
@@ -1033,6 +1041,14 @@ export default class CloudSyncPlugin extends Plugin {
     this.registerDomEvent(doc, "scroll", wakeSync);
     this.registerDomEvent(doc, "keyup", handleCursorMove);
     this.registerDomEvent(doc, "pointerup", handleCursorMove);
+
+    const handleWindowLeave = () => {
+      if (this.presenceManager) {
+        this.presenceManager.sendLeaveSignal();
+      }
+    };
+    this.registerDomEvent(window, "beforeunload", handleWindowLeave);
+    this.registerDomEvent(window, "pagehide", handleWindowLeave);
 
     this.scheduleNextLivePulse();
   }
@@ -1081,28 +1097,30 @@ export default class CloudSyncPlugin extends Plugin {
     }
   }
 
-  applyRemoteCursor(path: string, cursor: { line: number; ch: number }) {
-    const leaves = this.app.workspace.getLeavesOfType("markdown");
-    const matchingLeaf = leaves.find(
-      (l: any) => (l.view as any).file?.path === path
-    );
-    if (matchingLeaf && (matchingLeaf.view as any).editor) {
-      this.isApplyingRemoteCursor = true;
-      const editor = (matchingLeaf.view as any).editor;
-      window.setTimeout(() => {
-        try {
-          editor.setCursor(cursor);
-          editor.scrollIntoView({ from: cursor, to: cursor });
-        } catch {}
-        window.setTimeout(() => {
-          this.isApplyingRemoteCursor = false;
-        }, 500);
-      }, 50);
+  applyRemoteCursor(
+    path: string,
+    cursor: { line: number; ch: number },
+    deviceId?: string,
+    deviceName?: string
+  ) {
+    if (this.presenceManager) {
+      this.presenceManager.updateRemotePresence(
+        deviceId,
+        deviceName,
+        path,
+        cursor
+      );
+    }
+  }
+
+  removeRemoteCursor(deviceId: string) {
+    if (this.presenceManager) {
+      this.presenceManager.removeRemotePresence(deviceId);
     }
   }
 
   async sendCursorUpdate(path: string, cursor: { line: number; ch: number }) {
-    if (this.isSyncing || this.isFastSyncing || this.isApplyingRemoteCursor) return;
+    if (this.isSyncing || this.isFastSyncing) return;
     if (!this.settings.cloudsync?.token || !this.settings.cloudsync?.vaultId) return;
 
     const { fsRemote, fsEncrypt } = this.getOrCreateClients();
@@ -1147,7 +1165,14 @@ export default class CloudSyncPlugin extends Plugin {
           if (res.action === "deleted") deleted++;
 
           if (res.cursor) {
-            this.applyRemoteCursor(plainKey, res.cursor);
+            this.applyRemoteCursor(
+              plainKey,
+              res.cursor,
+              res.deviceId,
+              res.deviceName
+            );
+          } else if (res.action === "cursor" && res.deviceId) {
+            this.removeRemoteCursor(res.deviceId);
           }
         } finally {
           if (ch.action !== "cursor") {
