@@ -6,6 +6,15 @@ CloudSync is an independent sync plugin for Obsidian, originally forked from [re
 
 ---
 
+## Why CloudSync?
+
+- **Support Obsidian**: CloudSync is not meant to replace supporting the devs. If you can afford Obsidian Sync, please support Kepano and the core team.
+- **Most free options are impractical**: Setups like original Remotely Save over Google Drive, OneDrive, or WebDAV are fragile, slow, and frustrating to maintain. Generic cloud drives were not built for note sync.
+- **Why only Workers and VPS?**: They are the only practical platforms for real-time note sync. Cloudflare Workers + R2 provides the best free serverless tier, while Docker on a private VPS covers self-hosters. No other backends are needed.
+- **Zero-friction privacy**: An out-of-the-box, zero-knowledge encrypted sync engine on free infrastructure without setup headaches.
+
+---
+
 ## Features
 
 - **Zero-Knowledge Encryption**: AES-256 client-side encryption. Note contents, filenames, and folder structures are encrypted before leaving your device.
@@ -65,6 +74,15 @@ Server runs on port `3000` with data stored in `./data`.
 - `Open sync log`: View recent sync activity
 - `Choose remote vault`: Connect or switch remote vaults
 - `Backup device settings`: Back up settings, plugins, and themes
+
+---
+
+## Authentication & Recovery
+
+CloudSync uses **Username + Password + TOTP (2FA)** instead of email:
+
+- **Zero email dependencies**: No transactional mail services (Resend, SendGrid) or VPS mail daemons required. Deployments stay completely self-contained.
+- **Save your 2FA token**: There is no email password reset. With zero-knowledge encryption, if you lose your password or 2FA token, your vault cannot be recovered.
 
 ---
 
