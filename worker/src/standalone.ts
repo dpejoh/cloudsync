@@ -14,19 +14,26 @@ const DATA_DIR = path.resolve(process.env.DATA_DIR || "./data");
 const WORKER_MODE = (process.env.WORKER_MODE || "multi") as "single" | "multi";
 const SINGLE_USER_PASSWORD = process.env.SINGLE_USER_PASSWORD;
 
+// Restrict default file permissions for all generated data (DB, objects, secret).
+process.umask(0o077);
+
 // Persist or initialize JWT Secret
 const secretFilePath = path.join(DATA_DIR, ".jwt_secret");
 let JWT_SECRET = process.env.JWT_SECRET;
+
+if (!fs.existsSync(DATA_DIR)) {
+  fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
+}
+try {
+  fs.chmodSync(DATA_DIR, 0o700);
+} catch {}
 
 if (!JWT_SECRET) {
   if (fs.existsSync(secretFilePath)) {
     JWT_SECRET = fs.readFileSync(secretFilePath, "utf8").trim();
   } else {
     JWT_SECRET = crypto.randomBytes(32).toString("hex");
-    if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
-    }
-    fs.writeFileSync(secretFilePath, JWT_SECRET, "utf8");
+    fs.writeFileSync(secretFilePath, JWT_SECRET, { encoding: "utf8", mode: 0o600 });
     console.log("generated persistent jwt secret in data directory");
   }
 }

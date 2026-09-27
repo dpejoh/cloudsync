@@ -16,8 +16,7 @@
       "binding": "CLOUDSYNC_KV",
       "id": "34ddb4d814844e0f8a4fafd5f2d5ef2c"
     }
-  ],
-  "vars": {
-    "JWT_SECRET": "REDACTED"
-  }
+  ]
+  // Required: set a strong secret before deploying. Never commit it.
+  //   npx wrangler secret put JWT_SECRET
 }
