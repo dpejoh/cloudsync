@@ -51,6 +51,7 @@ export interface R2ListOptions {
 export interface R2PutOptions {
   httpMetadata?: R2HttpMetadata;
   customMetadata?: Record<string, string>;
+  onlyIf?: { etagMatches?: string; etagDoesNotMatch?: string };
 }
 
 interface R2Row {
@@ -227,7 +228,22 @@ export class LocalDiskBucket {
     key: string,
     value: any,
     options?: R2PutOptions
-  ): Promise<R2Object> {
+  ): Promise<R2Object | null> {
+    // Optimistic-concurrency precondition (mirrors R2 conditional puts).
+    if (options?.onlyIf) {
+      const existingRow = this.stmtGet.get(key) as R2Row | undefined;
+      const currentEtag = existingRow?.etag;
+      if (options.onlyIf.etagMatches !== undefined && options.onlyIf.etagMatches !== currentEtag) {
+        return null;
+      }
+      if (
+        options.onlyIf.etagDoesNotMatch !== undefined &&
+        (currentEtag === undefined || options.onlyIf.etagDoesNotMatch === currentEtag)
+      ) {
+        return null;
+      }
+    }
+
     const filePath = this.getFilePath(key);
     await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
 
@@ -257,7 +273,18 @@ export class LocalDiskBucket {
       buffer = Buffer.from(String(value || ""));
     }
 
-    await fs.promises.writeFile(filePath, buffer);
+    // Atomic replace: write to a temp file in the same directory, then rename over
+    // the target so readers never observe a torn/partial object.
+    const tmpPath = `${filePath}.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`;
+    try {
+      await fs.promises.writeFile(tmpPath, buffer);
+      await fs.promises.rename(tmpPath, filePath);
+    } catch (err) {
+      try {
+        await fs.promises.unlink(tmpPath);
+      } catch {}
+      throw err;
+    }
 
     const hash = crypto.createHash("md5").update(buffer).digest("hex");
     const etag = `"${hash}"`;
@@ -325,13 +352,13 @@ export class LocalDiskBucket {
           .prepare(
             "SELECT key, size, uploaded, etag, custom_metadata, http_metadata FROM r2_objects WHERE key > ? ORDER BY key ASC LIMIT ?"
           )
-          .all(cursor, limit + 1) as R2Row[];
+          .all(cursor, limit + 1) as unknown as R2Row[];
       } else {
         rows = this.db
           .prepare(
             "SELECT key, size, uploaded, etag, custom_metadata, http_metadata FROM r2_objects ORDER BY key ASC LIMIT ?"
           )
-          .all(limit + 1) as R2Row[];
+          .all(limit + 1) as unknown as R2Row[];
       }
     } else {
       const range = getPrefixRange(prefix);
@@ -341,13 +368,13 @@ export class LocalDiskBucket {
             .prepare(
               "SELECT key, size, uploaded, etag, custom_metadata, http_metadata FROM r2_objects WHERE key >= ? AND key < ? AND key > ? ORDER BY key ASC LIMIT ?"
             )
-            .all(range.start, range.end, cursor, limit + 1) as R2Row[];
+            .all(range.start, range.end, cursor, limit + 1) as unknown as R2Row[];
         } else {
           rows = this.db
             .prepare(
               "SELECT key, size, uploaded, etag, custom_metadata, http_metadata FROM r2_objects WHERE key >= ? AND key < ? ORDER BY key ASC LIMIT ?"
             )
-            .all(range.start, range.end, limit + 1) as R2Row[];
+            .all(range.start, range.end, limit + 1) as unknown as R2Row[];
         }
       } else {
         if (cursor) {
@@ -355,13 +382,13 @@ export class LocalDiskBucket {
             .prepare(
               "SELECT key, size, uploaded, etag, custom_metadata, http_metadata FROM r2_objects WHERE key >= ? AND key > ? ORDER BY key ASC LIMIT ?"
             )
-            .all(range.start, cursor, limit + 1) as R2Row[];
+            .all(range.start, cursor, limit + 1) as unknown as R2Row[];
         } else {
           rows = this.db
             .prepare(
               "SELECT key, size, uploaded, etag, custom_metadata, http_metadata FROM r2_objects WHERE key >= ? ORDER BY key ASC LIMIT ?"
             )
-            .all(range.start, limit + 1) as R2Row[];
+            .all(range.start, limit + 1) as unknown as R2Row[];
         }
       }
     }
