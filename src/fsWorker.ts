@@ -34,6 +34,11 @@ export class FakeFsWorker extends FakeFs {
   config: CloudSyncConfig;
   vaultName: string;
   latestRevision?: number;
+  /**
+   * Revision observed by the last full walk. Safe to persist as "last known"
+   * because a full walk has reconciled every object up to this revision.
+   */
+  latestWalkRevision?: number;
 
   constructor(config: CloudSyncConfig, vaultName: string) {
     super();
@@ -101,6 +106,7 @@ export class FakeFsWorker extends FakeFs {
     const json = res.json;
     if (json.revision !== undefined) {
       this.latestRevision = json.revision;
+      this.latestWalkRevision = json.revision;
     }
     return (json.files || []) as Entity[];
   }
@@ -218,6 +224,11 @@ export class FakeFsWorker extends FakeFs {
       size: content.byteLength,
       sizeRaw: content.byteLength,
       mtimeCli: mtime,
+      // The server stores and later reports the client mtime, so record it as the
+      // server-side mtime too. Without this, prevSync records created after an
+      // upload can never compare equal to the remote entity, which breaks
+      // deletion detection and can silently discard edits made with an older mtime.
+      mtimeSvr: mtime,
       ctimeCli: ctime,
       etag: res.headers["etag"],
     };

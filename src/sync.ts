@@ -1317,6 +1317,7 @@ const splitFourStepsOnEntityMappings = (
 
   let allFilesCount = 0; // how many files in entities
   let realModifyDeleteCount = 0; // how many files to be modified / deleted
+  let realDeleteFileCount = 0; // how many files to be deleted (not modified)
   let realTotalCount = 0; // how many files to be delt with
 
   for (let i = 0; i < sortedKeys.length; ++i) {
@@ -1392,6 +1393,7 @@ const splitFourStepsOnEntityMappings = (
       ) {
         // only count files here, skip folder
         realModifyDeleteCount += 1;
+        realDeleteFileCount += 1;
       }
     } else if (
       val.decision === "local_is_modified_then_push" ||
@@ -1439,6 +1441,7 @@ const splitFourStepsOnEntityMappings = (
     uploadDownloads: uploadDownloads,
     allFilesCount: allFilesCount,
     realModifyDeleteCount: realModifyDeleteCount,
+    realDeleteFileCount: realDeleteFileCount,
     realTotalCount: realTotalCount,
   };
 };
@@ -1647,6 +1650,7 @@ export const doActualSync = async (
   profileID: string,
   concurrency: number,
   protectModifyPercentage: number,
+  safetyDeletionThreshold: number,
   getProtectModifyPercentageErrorStrFunc: any,
   db: InternalDBs,
   profiler: Profiler | undefined,
@@ -1664,6 +1668,7 @@ export const doActualSync = async (
     uploadDownloads,
     allFilesCount,
     realModifyDeleteCount,
+    realDeleteFileCount,
     realTotalCount,
   } = splitFourStepsOnEntityMappings(mixedEntityMappings);
   // console.debug(`onlyMarkSyncedOps: ${JSON.stringify(onlyMarkSyncedOps)}`);
@@ -1686,6 +1691,13 @@ export const doActualSync = async (
   profiler?.insertSize("doActualSync: sizeof realTotalCount", deletionOps);
 
   console.debug(`protectModifyPercentage: ${protectModifyPercentage}`);
+  console.debug(`safetyDeletionThreshold: ${safetyDeletionThreshold}`);
+
+  if (safetyDeletionThreshold > 0 && realDeleteFileCount > safetyDeletionThreshold) {
+    throw Error(
+      `Safety protection triggered: ${realDeleteFileCount} files would be deleted, exceeding your configured limit of ${safetyDeletionThreshold}.`
+    );
+  }
 
   if (
     protectModifyPercentage >= 0 &&
@@ -1979,6 +1991,7 @@ export async function syncer(
         profileID,
         settings.concurrency ?? 5,
         settings.protectModifyPercentage ?? 50,
+        settings.safetyDeletionThreshold ?? 25,
         getProtectModifyPercentageErrorStrFunc,
         db,
         profiler,

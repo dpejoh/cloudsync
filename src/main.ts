@@ -167,6 +167,7 @@ export default class CloudSyncPlugin extends Plugin {
 
   debouncePushTimer?: number;
   pendingModifiedPaths: Set<string> = new Set<string>();
+  pendingDeletedPaths: Set<string> = new Set<string>();
   suppressLocalEvents: Set<string> = new Set<string>();
   livePulseIntervalID?: number;
   livePulseTimeoutID?: number;
@@ -655,11 +656,12 @@ export default class CloudSyncPlugin extends Plugin {
       });
       new Notice(`Sync failed: ${err?.message || err}`);
     } finally {
-      if (this.cachedFsRemote?.latestRevision) {
-        this.lastKnownRevision = Math.max(
-          this.lastKnownRevision,
-          this.cachedFsRemote.latestRevision
-        );
+      // A full sync reconciles the entire vault, so the revision observed by the
+      // last full walk is safe to persist. Write-response revisions are not used
+      // because they can be newer than a concurrent remote change we never saw.
+      const walkRev = this.cachedFsRemote?.latestWalkRevision;
+      if (walkRev && walkRev > this.lastKnownRevision) {
+        this.lastKnownRevision = walkRev;
         await saveLatestVaultRevision(
           this.db,
           this.vaultRandomID,
@@ -718,13 +720,29 @@ export default class CloudSyncPlugin extends Plugin {
 
     this.registerObsidianProtocolHandler(COMMAND_URI, async (inputParams) => {
       const parsed = importQrCodeUri(inputParams, this.app.vault.getName());
-      if (parsed.status === "error") {
+      if (parsed.status === "error" || parsed.result === undefined) {
         new Notice(parsed.message);
-      } else {
-        this.settings = Object.assign({}, this.settings, parsed.result);
-        await this.saveSettings();
-        new Notice("Settings imported.");
+        return;
       }
+
+      const imported = parsed.result;
+      const importedUrl = imported.cloudsync?.serverUrl ?? "";
+      if (importedUrl && !/^https?:\/\//i.test(importedUrl)) {
+        new Notice("Imported settings rejected: invalid server URL.");
+        return;
+      }
+      if (!confirm(
+        `Import settings from this link?\n\n` +
+          `Server: ${importedUrl || "(none)"}\n` +
+          `Account: ${imported.cloudsync?.username || "(none)"}\n\n` +
+          `This will replace your sync configuration and may sign you in to the server above.`,
+      )) {
+        return;
+      }
+
+      this.settings = Object.assign({}, this.settings, imported);
+      await this.saveSettings();
+      new Notice("Settings imported.");
     });
 
     this.syncRibbon = this.addRibbonIcon(
@@ -1123,12 +1141,9 @@ export default class CloudSyncPlugin extends Plugin {
     if (this.isSyncing || this.isFastSyncing) return;
     if (!this.settings.cloudsync?.token || !this.settings.cloudsync?.vaultId) return;
 
-    const { fsRemote, fsEncrypt } = this.getOrCreateClients();
+    const { fsEncrypt } = this.getOrCreateClients();
     try {
       await fsEncrypt.updateCursor(path, cursor);
-      if (fsRemote.latestRevision && fsRemote.latestRevision > this.lastKnownRevision) {
-        this.lastKnownRevision = fsRemote.latestRevision;
-      }
     } catch {}
   }
 
@@ -1225,11 +1240,19 @@ export default class CloudSyncPlugin extends Plugin {
     return false;
   }
 
-  onVaultModified(path: string) {
+  onVaultModified(path: string, isDeletion = false) {
     this.lastUserActivityTime = Date.now();
     if (this.isSyncing || this.isFastSyncing) return;
     if (!this.settings.cloudsync?.token || !this.settings.cloudsync?.vaultId) return;
     if (this.shouldIgnorePath(path)) return;
+
+    // Only an explicit deletion event may propagate a remote delete. This avoids
+    // treating transient stat failures or renamed files as deletions.
+    if (isDeletion) {
+      this.pendingDeletedPaths.add(path);
+    } else {
+      this.pendingDeletedPaths.delete(path);
+    }
 
     const leaves = this.app.workspace.getLeavesOfType("markdown");
     const activeLeaf = leaves.find(
@@ -1257,7 +1280,9 @@ export default class CloudSyncPlugin extends Plugin {
     if (this.pendingModifiedPaths.size === 0) return;
 
     const pathsToSync = Array.from(this.pendingModifiedPaths);
+    const deletedPaths = new Set(this.pendingDeletedPaths);
     this.pendingModifiedPaths.clear();
+    this.pendingDeletedPaths.clear();
     this.hasPendingSyncOnSave = false;
 
     if (pathsToSync.length > 5) {
@@ -1265,10 +1290,10 @@ export default class CloudSyncPlugin extends Plugin {
       return;
     }
 
-    await this.runFastPush(pathsToSync);
+    await this.runFastPush(pathsToSync, deletedPaths);
   }
 
-  async runFastPush(paths: string[]) {
+  async runFastPush(paths: string[], deletedPaths: Set<string> = new Set()) {
     if (this.isSyncing || this.isFastSyncing) return;
     this.isFastSyncing = true;
     const { fsLocal, fsRemote, fsEncrypt, profileID } = this.getOrCreateClients();
@@ -1296,11 +1321,12 @@ export default class CloudSyncPlugin extends Plugin {
               profileID,
               this.settings,
               cursor,
-              this.app.vault.configDir
+              this.app.vault.configDir,
+              deletedPaths.has(p)
             );
             this.addSyncLog({
-              type: "success",
-              message: `Uploaded ${p}`,
+              type: deletedPaths.has(p) ? "info" : "success",
+              message: deletedPaths.has(p) ? `Deleted ${p}` : `Uploaded ${p}`,
               file: p,
             });
           } catch (err) {
@@ -1313,18 +1339,13 @@ export default class CloudSyncPlugin extends Plugin {
       if (failedPaths.length > 0) {
         for (const fp of failedPaths) {
           this.pendingModifiedPaths.add(fp);
+          if (deletedPaths.has(fp)) this.pendingDeletedPaths.add(fp);
         }
       }
 
-      if (fsRemote.latestRevision && fsRemote.latestRevision > this.lastKnownRevision) {
-        this.lastKnownRevision = fsRemote.latestRevision;
-        await saveLatestVaultRevision(
-          this.db,
-          this.vaultRandomID,
-          profileID,
-          this.lastKnownRevision
-        );
-      }
+      // NOTE: deliberately do not advance lastKnownRevision from write responses.
+      // A write's revision can be newer than another device's concurrent change,
+      // which would make the next getChanges() call skip that change entirely.
 
       if (this.statusBarElement) {
         this.statusBarElement.setText(
@@ -1462,12 +1483,12 @@ export default class CloudSyncPlugin extends Plugin {
     );
     this.registerEvent(
       this.app.vault.on("delete", (file) => {
-        this.onVaultModified(file.path);
+        this.onVaultModified(file.path, true);
       })
     );
     this.registerEvent(
       this.app.vault.on("rename", (file, oldPath) => {
-        this.onVaultModified(oldPath);
+        this.onVaultModified(oldPath, true);
         this.onVaultModified(file.path);
       })
     );

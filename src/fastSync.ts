@@ -10,6 +10,7 @@ import type { FakeFsEncrypt } from "./fsEncrypt";
 import type { VaultChangeItem } from "./fsWorker";
 import {
   clearPrevSyncRecordByVaultAndProfile,
+  getPrevSyncRecordByVaultAndProfile,
   type InternalDBs,
   upsertPrevSyncRecordByVaultAndProfile,
 } from "./localdb";
@@ -31,7 +32,8 @@ export async function fastPushPath(
   profileID: string,
   settings: RemotelySavePluginSettings,
   cursor?: { line: number; ch: number },
-  configDir?: string
+  configDir?: string,
+  isDeletion = false
 ): Promise<boolean> {
   const isNotesOnly = (settings.settingsSyncMode ?? "notes_only") !== "shared";
   const cfgDir = configDir || ".obsidian";
@@ -88,6 +90,18 @@ export async function fastPushPath(
     );
     return true;
   } else {
+    // The local file is gone. Only delete the remote copy when the vault
+    // explicitly reported a deletion AND we have a previous sync record for it.
+    // A transient stat/read failure must never be interpreted as a deletion.
+    const prevSyncRecord = await getPrevSyncRecordByVaultAndProfile(
+      db,
+      vaultRandomID,
+      profileID,
+      path
+    );
+    if (!isDeletion || prevSyncRecord === null || prevSyncRecord === undefined) {
+      return false;
+    }
     try {
       await fsEncrypt.rm(path);
     } catch {}
@@ -211,15 +225,22 @@ export async function fastPullChange(
       deviceName: change.deviceName,
     };
   } else if (change.action === "delete") {
-    let localExists = false;
+    let localStat: Entity | null = null;
     try {
-      await fsLocal.stat(plainKey);
-      localExists = true;
+      localStat = await fsLocal.stat(plainKey);
     } catch {
-      localExists = false;
+      localStat = null;
     }
 
-    if (localExists) {
+    if (localStat !== null && localStat.mtimeCli !== undefined && !isMTimeEqual(localStat.mtimeCli, change.mtime, 1500)) {
+      if (localStat.mtimeCli > change.mtime + 1500) {
+        // Local copy was modified after the remote deletion; keep it and let the
+        // next full sync push it back instead of silently discarding the edit.
+        return { action: "skipped", path: plainKey };
+      }
+    }
+
+    if (localStat !== null) {
       await fsLocal.rm(plainKey);
     }
     await clearPrevSyncRecordByVaultAndProfile(
