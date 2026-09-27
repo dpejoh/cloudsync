@@ -265,14 +265,29 @@ export class VaultPickerModal extends Modal {
     ) {
       cs.vaultOwner = vaultOwner;
       const sharedPassword = window.prompt(
-        `Connecting to shared vault "${vaultName}" (owned by ${vaultOwner}).\n\nIf this vault is end-to-end encrypted, enter the vault password provided by the owner (leave empty if unencrypted):`
+        `Connecting to shared vault "${vaultName}" (owned by ${vaultOwner}).\n\n` +
+          `If this vault is encrypted, paste the 64-character vault encryption key provided by the owner ` +
+          `(the owner must never share their account password). Leave empty only if the vault is not encrypted:`
       );
-      if (sharedPassword !== null) {
-        const clean = sharedPassword.trim();
-        if (clean) {
-          this.plugin.settings.password = clean;
-          cs.encryptionKey = clean;
+      if (sharedPassword === null) {
+        cs.vaultOwner = "";
+        return;
+      }
+      const clean = sharedPassword.trim();
+      if (clean) {
+        if (!/^[a-fA-F0-9]{64}$/.test(clean)) {
+          new Notice(
+            "Invalid shared vault key. It must be the 64-character hex encryption key shown by the owner, not their account password.",
+            9000
+          );
+          cs.vaultOwner = "";
+          return;
         }
+        this.plugin.settings.password = clean;
+        cs.encryptionKey = clean;
+      } else {
+        this.plugin.settings.password = "";
+        cs.encryptionKey = "";
       }
     } else {
       cs.vaultOwner = cs.username || "";

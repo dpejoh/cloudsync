@@ -9,7 +9,9 @@ import {
 import {
   deriveZeroKnowledgeKeys,
   deriveRecoveryVerifier,
+  generateRecoveryKey,
 } from "./authHelper";
+import { RecoveryKeyModal } from "./recoveryKeyModal";
 import { OBSIDIAN_LOGO_PNG } from "./assets/logo";
 import {
   type CloudSyncConfig,
@@ -615,6 +617,8 @@ export class CloudSyncSettingTab extends PluginSettingTab {
       );
 
       if (this.isRegisterMode) {
+        const recoveryKey = generateRecoveryKey();
+        const recoveryVerifier = await deriveRecoveryVerifier(recoveryKey);
         const res = await requestUrl({
           url: `${cs.serverUrl}/api/auth/register`,
           method: "POST",
@@ -622,6 +626,7 @@ export class CloudSyncSettingTab extends PluginSettingTab {
           body: JSON.stringify({
             username: this.usernameInput,
             verifier: authVerifier,
+            recoveryVerifier,
           }),
           throw: false,
         });
@@ -639,6 +644,7 @@ export class CloudSyncSettingTab extends PluginSettingTab {
         cs.vaultId = this.app.vault.getName();
         cs.encryptionKey = encryptionKey;
         cs.has2FA = false;
+        cs.recoveryKey = recoveryKey;
         this.plugin.settings.password = encryptionKey;
         this.plugin.settings.encryptionMethod = "rclone-base64";
 
@@ -647,6 +653,8 @@ export class CloudSyncSettingTab extends PluginSettingTab {
 
         this.isLoading = false;
         new Notice("Account created.");
+
+        new RecoveryKeyModal(this.app, recoveryKey, () => this.display()).open();
 
         new TwoFactorModal(this.app, this.plugin, "intro", () => {
           this.display();
@@ -720,6 +728,16 @@ export class CloudSyncSettingTab extends PluginSettingTab {
       return;
     }
 
+    if (
+      !confirm(
+        "Resetting your password changes the key used to encrypt your notes.\n\n" +
+          "Notes that were encrypted with the previous password cannot be decrypted afterwards. " +
+          "Only continue if you still know the old password, or accept losing access to the existing encrypted remote notes."
+      )
+    ) {
+      return;
+    }
+
     this.isLoading = true;
     this.errorMessage = null;
     this.display();
@@ -788,6 +806,15 @@ export class CloudSyncSettingTab extends PluginSettingTab {
     const vaultName = cs.vaultId || this.app.vault.getName();
 
     await this.fetchStorageUsage();
+
+    if (this.plugin.settings.encryptionMethod === "openssl-base64") {
+      new Setting(containerEl)
+        .setClass("banner-2fa")
+        .setName("Legacy encryption mode detected")
+        .setDesc(
+          "This vault uses the legacy OpenSSL AES-CBC format, which does not authenticate note contents. A malicious server could alter notes without detection. New accounts use rclone encryption; migrate by re-encrypting with a fresh vault to get integrity protection."
+        );
+    }
 
     if (cs.mode === "multi" && !cs.has2FA) {
       new Setting(containerEl)
@@ -993,6 +1020,77 @@ export class CloudSyncSettingTab extends PluginSettingTab {
         });
     }
 
+    if (cs.mode === "multi" && cs.username) {
+      new Setting(containerEl)
+        .setName("Recovery key")
+        .setDesc(
+          cs.recoveryKey
+            ? "Stored on this device. Keep it offline; anyone with it can reset your password."
+            : "No recovery key stored on this device. Generate one so you can reset your password without your authenticator app."
+        )
+        .addExtraButton((btn) => {
+          btn
+            .setIcon("lucide-copy")
+            .setTooltip("Copy recovery key")
+            .setDisabled(!cs.recoveryKey)
+            .onClick(async () => {
+              if (!cs.recoveryKey) return;
+              await navigator.clipboard.writeText(cs.recoveryKey);
+              new Notice("Recovery key copied to clipboard.");
+            });
+        })
+        .addButton((btn) => {
+          btn.setButtonText("View").onClick(() => {
+            if (!cs.recoveryKey) {
+              new Notice("No recovery key stored on this device.");
+              return;
+            }
+            new RecoveryKeyModal(this.app, cs.recoveryKey).open();
+          });
+        })
+        .addButton((btn) => {
+          btn
+            .setButtonText(cs.recoveryKey ? "Generate new" : "Generate")
+            .setCta()
+            .onClick(async () => {
+              if (
+                cs.recoveryKey &&
+                !confirm(
+                  "Generating a new recovery key invalidates the previous one. Continue?"
+                )
+              ) {
+                return;
+              }
+              btn.setDisabled(true);
+              try {
+                const newKey = generateRecoveryKey();
+                const recoveryVerifier = await deriveRecoveryVerifier(newKey);
+                const res = await requestUrl({
+                  url: `${cs.serverUrl}/api/user/recovery-key`,
+                  method: "POST",
+                  headers: {
+                    Authorization: `Bearer ${cs.token}`,
+                    "Content-Type": "application/json",
+                  },
+                  body: JSON.stringify({ recoveryVerifier }),
+                  throw: false,
+                });
+                if (res.status !== 200) {
+                  new Notice(res.json?.error || "Failed to store recovery key.");
+                  btn.setDisabled(false);
+                  return;
+                }
+                cs.recoveryKey = newKey;
+                await this.plugin.saveSettings();
+                new RecoveryKeyModal(this.app, newKey, () => this.display()).open();
+              } catch (err: any) {
+                new Notice(`Error: ${err?.message || err}`);
+                btn.setDisabled(false);
+              }
+            });
+        });
+    }
+
     // 2. Vault & Sync Controls
     new Setting(containerEl)
       .setName("Remote Vault & Sync Controls")
@@ -1041,6 +1139,22 @@ export class CloudSyncSettingTab extends PluginSettingTab {
         });
 
       if (!isSharedVault) {
+        vaultSetting.addExtraButton((btn) => {
+          btn
+            .setIcon("lucide-key-round")
+            .setTooltip(
+              "Copy vault encryption key (share with collaborators so they can decrypt this vault)"
+            )
+            .setDisabled(!this.plugin.settings.password)
+            .onClick(async () => {
+              if (!this.plugin.settings.password) return;
+              await navigator.clipboard.writeText(this.plugin.settings.password);
+              new Notice(
+                "Vault encryption key copied. Only share it with people you trust; it grants full access to this vault's contents.",
+                8000
+              );
+            });
+        });
         vaultSetting.addButton((btn) => {
           btn
             .setButtonText("Collaborators")
