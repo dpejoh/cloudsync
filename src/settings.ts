@@ -1065,71 +1065,49 @@ export class CloudSyncSettingTab extends PluginSettingTab {
               cs.vaultOwner = "";
               this.plugin.clearCachedClients();
               await this.plugin.saveSettings();
-              new Notice(`Disconnected from remote vault "${disconnectedVault}".`);
+              new Notice(
+                `Disconnected from remote vault "${disconnectedVault}".`
+              );
               this.display();
             });
         })
         .addButton((btn) => {
-          btn
-            .setButtonText("Switch vault")
-            .onClick(() => {
-              new VaultPickerModal(this.app, this.plugin, () => this.display()).open();
-            });
+          btn.setButtonText("Switch vault").onClick(() => {
+            new VaultPickerModal(this.app, this.plugin, () =>
+              this.display()
+            ).open();
+          });
         });
 
       if (!isSharedVault) {
-        vaultSetting.addExtraButton((btn) => {
-          btn
-            .setIcon("lucide-key-round")
-            .setTooltip(
-              "Copy vault encryption key (share with collaborators so they can decrypt this vault)"
-            )
-            .setDisabled(!this.plugin.settings.password)
-            .onClick(async () => {
-              if (!this.plugin.settings.password) return;
-              await navigator.clipboard.writeText(this.plugin.settings.password);
-              new Notice(
-                "Vault encryption key copied. Only share it with people you trust; it grants full access to this vault's contents.",
-                8000
-              );
-            });
-        });
         vaultSetting.addButton((btn) => {
-          btn
-            .setButtonText("Collaborators")
-            .onClick(() => {
-              new VaultShareModal(this.app, this.plugin, cs.vaultId).open();
-            });
+          btn.setButtonText("Collaborators").onClick(() => {
+            new VaultShareModal(this.app, this.plugin, cs.vaultId).open();
+          });
         });
       }
 
       if (isSharedVault) {
         new Setting(containerEl)
-          .setName("Shared vault encryption password")
+          .setName("Shared vault key")
           .setDesc(
-            `If the owner encrypted this vault, enter the shared password to decrypt files. Leave empty if unencrypted.`
-          )
-          .addText((text) => {
-            text
-              .setPlaceholder("Enter shared vault password")
-              .setValue(this.plugin.settings.password || "")
-              .onChange(async (val) => {
-                this.plugin.settings.password = val.trim();
-                cs.encryptionKey = val.trim();
-                await this.plugin.saveSettings();
-              });
-          });
+            "This vault's key was delivered automatically by the owner. No password needs to be entered."
+          );
       }
     } else {
       new Setting(containerEl)
         .setName("Connected remote vault")
-        .setDesc("No remote vault connected. Choose an existing vault or create a new one.")
+        .setDesc(
+          "No remote vault connected. Choose an existing vault or create a new one."
+        )
         .addButton((btn) => {
           btn
             .setButtonText("Choose vault")
             .setCta()
             .onClick(() => {
-              new VaultPickerModal(this.app, this.plugin, () => this.display()).open();
+              new VaultPickerModal(this.app, this.plugin, () =>
+                this.display()
+              ).open();
             });
         });
     }

@@ -1,11 +1,13 @@
 import { App, Modal, Notice, Platform, requestUrl } from "obsidian";
 import type CloudSyncPlugin from "./main";
+import { confirmVaultRekey, runVaultRekey } from "./rotationUi";
 
 export class VaultShareModal extends Modal {
   plugin: CloudSyncPlugin;
   vaultName: string;
   private shares: string[] = [];
   private isLoading = true;
+  private isRotating = false;
   private inviteUsername = "";
   private errorMessage: string | null = null;
 
@@ -76,6 +78,21 @@ export class VaultShareModal extends Modal {
 
       if (res.status === 200) {
         new Notice(`Shared "${this.vaultName}" with ${username}.`);
+        if (cs.scheme === 2) {
+          try {
+            const version = this.plugin.keyManager.vaultKeyVersion(this.vaultName) ?? 1;
+            await this.plugin.keyManager.shareVaultKeyWith({
+              vaultId: this.vaultName,
+              version,
+              recipientUsername: username,
+            });
+          } catch (err: any) {
+            new Notice(
+              `Invited, but delivering the vault key failed: ${err?.message || err}. Use "Copy vault encryption key" as a fallback.`,
+              12000
+            );
+          }
+        }
         this.inviteUsername = "";
         await this.fetchShares();
         this.render();
@@ -91,6 +108,8 @@ export class VaultShareModal extends Modal {
 
   private async removeShare(username: string) {
     const cs = this.plugin.settings.cloudsync;
+    if (!confirm(`Remove ${username} from "${this.vaultName}"?`)) return;
+
     try {
       const res = await requestUrl({
         url: `${cs.serverUrl}/api/sync/shares?vault=${encodeURIComponent(this.vaultName)}&username=${encodeURIComponent(username)}`,
@@ -105,6 +124,24 @@ export class VaultShareModal extends Modal {
         new Notice(`Removed ${username} from "${this.vaultName}".`);
         await this.fetchShares();
         this.render();
+
+        if (
+          !this.isRotating &&
+          cs.scheme === 2 &&
+          confirm(
+            `Rotate the vault key now?\n\nThis permanently invalidates the key copy ${username} received. Other collaborators keep access automatically.`
+          )
+        ) {
+          this.isRotating = true;
+          this.render();
+          try {
+            await runVaultRekey(this.plugin, this.vaultName);
+          } finally {
+            this.isRotating = false;
+            await this.fetchShares();
+            this.render();
+          }
+        }
       } else {
         new Notice(res.json?.error || "Failed to remove user.");
       }
@@ -125,6 +162,13 @@ export class VaultShareModal extends Modal {
     if (this.errorMessage) {
       const errBox = contentEl.createDiv({ cls: "error-banner" });
       errBox.setText(this.errorMessage);
+    }
+
+    if (this.isRotating) {
+      const rotateBox = contentEl.createDiv({ cls: "error-banner" });
+      rotateBox.setText(
+        "Re-keying this vault... keep Obsidian open until it finishes. Sync is paused for all devices meanwhile."
+      );
     }
 
     const sharesContainerEl = contentEl.createDiv({
@@ -213,6 +257,7 @@ export class VaultShareModal extends Modal {
           cls: "share-remove-btn mod-destructive",
           text: "Remove",
         });
+        removeBtn.disabled = this.isRotating;
         removeBtn.onclick = () => this.removeShare(user);
       }
     }
@@ -243,12 +288,39 @@ export class VaultShareModal extends Modal {
       cls: "mod-cta invite-btn",
       text: "Add",
     });
+    addBtn.disabled = this.isRotating;
     addBtn.onclick = () => this.inviteUser();
 
     // Footer with Done button
     const footer = contentEl.createDiv({ cls: "modal-button-container" });
+    const rotateBtn = footer.createEl("button", {
+      cls: "mod-warning",
+      text: "Re-key vault key",
+    });
+    rotateBtn.disabled = this.isRotating;
+    rotateBtn.onclick = () => this.startRotation();
     footer.createEl("button", { text: "Done" }, (btn) => {
       btn.onclick = () => this.close();
     });
+  }
+
+  /**
+   * Explicitly rotate the vault key: new random key, full re-encryption, old
+   * history/trash purged, remaining collaborators get the new key automatically.
+   */
+  private async startRotation() {
+    const cs = this.plugin.settings.cloudsync;
+    if (cs.scheme !== 2 || this.isRotating) return;
+    if (!confirmVaultRekey()) return;
+
+    this.isRotating = true;
+    this.render();
+    try {
+      await runVaultRekey(this.plugin, this.vaultName);
+    } finally {
+      this.isRotating = false;
+      await this.fetchShares();
+      this.render();
+    }
   }
 }

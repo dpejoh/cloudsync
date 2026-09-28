@@ -264,30 +264,32 @@ export class VaultPickerModal extends Modal {
       vaultOwner.toLowerCase() !== (cs.username || "").toLowerCase()
     ) {
       cs.vaultOwner = vaultOwner;
-      const sharedPassword = window.prompt(
-        `Connecting to shared vault "${vaultName}" (owned by ${vaultOwner}).\n\n` +
-          `If this vault is encrypted, paste the 64-character vault encryption key provided by the owner ` +
-          `(the owner must never share their account password). Leave empty only if the vault is not encrypted:`
-      );
-      if (sharedPassword === null) {
+
+      // The owner delivers the vault key in an envelope, so no manual key
+      // exchange is needed.
+      if (cs.scheme !== 2) {
+        new Notice("Please sign in again with CloudSync 2.0 to access shared vaults.");
         cs.vaultOwner = "";
         return;
       }
-      const clean = sharedPassword.trim();
-      if (clean) {
-        if (!/^[a-fA-F0-9]{64}$/.test(clean)) {
+      try {
+        const opened = await this.plugin.keyManager.fetchSharedVaultKey({
+          vaultId: vaultName,
+          ownerUsername: vaultOwner,
+        });
+        if (!opened) {
           new Notice(
-            "Invalid shared vault key. It must be the 64-character hex encryption key shown by the owner, not their account password.",
+            `The owner has not shared the vault key with your account yet. Ask ${vaultOwner} to invite you again.`,
             9000
           );
           cs.vaultOwner = "";
           return;
         }
-        this.plugin.settings.password = clean;
-        cs.encryptionKey = clean;
-      } else {
-        this.plugin.settings.password = "";
-        cs.encryptionKey = "";
+        new Notice(`Vault key received from ${vaultOwner}.`);
+      } catch (err: any) {
+        new Notice(`Could not fetch the shared vault key: ${err?.message || err}`);
+        cs.vaultOwner = "";
+        return;
       }
     } else {
       cs.vaultOwner = cs.username || "";
