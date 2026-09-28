@@ -20,6 +20,9 @@ logs.txt
 data/
 test-vps-data/
 
+# security/data-loss audit artifacts (never commit)
+audit/
+
 # hidden files
 .*
 !.github/

@@ -4,3 +4,4 @@ data/
 .jwt_secret
 .wrangler/
 *.log
+.dev.vars
