@@ -1,5 +1,6 @@
 import { requestUrl } from "obsidian";
 import type { CloudSyncConfig, Entity } from "./baseTypes";
+import { computeIntegrityMac, verifyIntegrityMac } from "./cryptoV2";
 import { FakeFs } from "./fsAll";
 
 export interface VaultChangeItem {
@@ -40,19 +41,47 @@ export class FakeFsWorker extends FakeFs {
    */
   latestWalkRevision?: number;
 
+  private integrityKey?: Uint8Array;
+  private rotationMode = false;
+  private keyVersion?: number;
+
   constructor(config: CloudSyncConfig, vaultName: string) {
     super();
     this.config = config;
     this.vaultName = config.vaultId || vaultName;
   }
 
+  setIntegrityKey(key?: Uint8Array): void {
+    this.integrityKey = key;
+  }
+
+  /**
+   * The vault key generation this client encrypts with. The server rejects
+   * writes carrying a stale generation, which prevents two devices from
+   * mixing key generations in one vault after a re-key.
+   */
+  setKeyVersion(version?: number): void {
+    this.keyVersion = version;
+  }
+
+  /** While rotating, the owner bypasses the server-side write lock. */
+  setRotationMode(on: boolean): void {
+    this.rotationMode = on;
+  }
+
   get activeVault(): string {
     return this.config.vaultId || this.vaultName;
   }
 
-  private handleHttpError(operation: string, status: number, text?: string): never {
+  private handleHttpError(
+    operation: string,
+    status: number,
+    text?: string
+  ): never {
     if (status === 401) {
-      throw new Error("CloudSync session expired (401 Unauthorized). Please log in again.");
+      throw new Error(
+        "CloudSync session expired (401 Unauthorized). Please log in again."
+      );
     }
     throw new Error(`CloudSync ${operation} failed (${status}): ${text || ""}`);
   }
@@ -71,6 +100,12 @@ export class FakeFsWorker extends FakeFs {
     }
     if (this.config.deviceName) {
       h["x-device-name"] = encodeURIComponent(this.config.deviceName);
+    }
+    if (this.rotationMode) {
+      h["x-rotation"] = "1";
+    }
+    if (this.keyVersion !== undefined) {
+      h["x-key-version"] = `${this.keyVersion}`;
     }
     return h;
   }
@@ -145,11 +180,7 @@ export class FakeFsWorker extends FakeFs {
     };
   }
 
-  async mkdir(
-    key: string,
-    mtime?: number,
-    ctime?: number
-  ): Promise<Entity> {
+  async mkdir(key: string, mtime?: number, ctime?: number): Promise<Entity> {
     const normKey = key.endsWith("/") ? key : `${key}/`;
     const url = `${this.baseUrl}/api/sync/file?${this.vaultQuery}&key=${encodeURIComponent(normKey)}`;
 
@@ -195,6 +226,14 @@ export class FakeFsWorker extends FakeFs {
       "x-ctime": `${ctime}`,
       "content-type": "application/octet-stream",
     };
+
+    if (this.integrityKey) {
+      headers["x-integrity"] = await computeIntegrityMac(
+        this.integrityKey,
+        key,
+        new Uint8Array(content)
+      );
+    }
 
     if (cursor) {
       headers["x-cursor-line"] = `${cursor.line}`;
@@ -248,6 +287,21 @@ export class FakeFsWorker extends FakeFs {
       this.handleHttpError("readFile", res.status, res.text);
     }
 
+    const expectedIntegrity = res.headers?.["x-integrity"];
+    if (this.integrityKey && expectedIntegrity) {
+      const valid = await verifyIntegrityMac(
+        this.integrityKey,
+        key,
+        new Uint8Array(res.arrayBuffer),
+        expectedIntegrity
+      );
+      if (!valid) {
+        throw new Error(
+          `CloudSync integrity check failed for "${key}". The remote object may have been altered or swapped by the server.`
+        );
+      }
+    }
+
     return res.arrayBuffer;
   }
 
@@ -293,6 +347,25 @@ export class FakeFsWorker extends FakeFs {
     }
   }
 
+  /**
+   * Bulk permanent delete during rotation. Batched so a large re-key does not
+   * issue thousands of requests (which used to fail under metadata contention).
+   */
+  async purgeMany(keys: string[]): Promise<void> {
+    if (keys.length === 0) return;
+    const url = `${this.baseUrl}/api/vaults/${encodeURIComponent(this.activeVault)}/purge-objects`;
+    const res = await requestUrl({
+      url,
+      method: "POST",
+      headers: { ...this.headers, "content-type": "application/json" },
+      body: JSON.stringify({ keys }),
+      throw: false,
+    });
+    if (res.status !== 200) {
+      this.handleHttpError("purge", res.status, res.text);
+    }
+  }
+
   async getChanges(sinceRev: number): Promise<VaultChangesResponse> {
     if (!this.baseUrl || !this.config.token) {
       return { ok: false, revision: 0, fullScanNeeded: false, changes: [] };
@@ -316,7 +389,6 @@ export class FakeFsWorker extends FakeFs {
     }
     return data;
   }
-
 
   async updateCursor(
     key: string,

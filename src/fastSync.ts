@@ -9,9 +9,9 @@ import type { FakeFs } from "./fsAll";
 import type { FakeFsEncrypt } from "./fsEncrypt";
 import type { VaultChangeItem } from "./fsWorker";
 import {
+  type InternalDBs,
   clearPrevSyncRecordByVaultAndProfile,
   getPrevSyncRecordByVaultAndProfile,
-  type InternalDBs,
   upsertPrevSyncRecordByVaultAndProfile,
 } from "./localdb";
 import { fullfillMTimeOfRemoteEntityInplace, isMTimeEqual } from "./sync";
@@ -99,7 +99,11 @@ export async function fastPushPath(
       profileID,
       path
     );
-    if (!isDeletion || prevSyncRecord === null || prevSyncRecord === undefined) {
+    if (
+      !isDeletion ||
+      prevSyncRecord === null ||
+      prevSyncRecord === undefined
+    ) {
       return false;
     }
     try {
@@ -132,6 +136,16 @@ export async function fastPullChange(
   deviceName?: string;
 }> {
   const plainKey = await fsEncrypt.decryptRemoteKey(change.key);
+
+  // A name that does not decrypt to a plausible path belongs to another key
+  // generation; never let it create or delete local files.
+  if (
+    plainKey.length === 0 ||
+    plainKey.includes("\uFFFD") ||
+    plainKey.includes("\u0000")
+  ) {
+    return { action: "skipped", path: plainKey };
+  }
 
   if (
     plainKey.startsWith(DEFAULT_DEBUG_FOLDER) ||
@@ -225,6 +239,19 @@ export async function fastPullChange(
       deviceName: change.deviceName,
     };
   } else if (change.action === "delete") {
+    // Only mirror a remote deletion when this path was previously synced by
+    // this profile. A stale-generation or garbage name must never be able to
+    // delete an unrelated local file.
+    const prevSyncRecord = await getPrevSyncRecordByVaultAndProfile(
+      db,
+      vaultRandomID,
+      profileID,
+      plainKey
+    );
+    if (prevSyncRecord === null || prevSyncRecord === undefined) {
+      return { action: "skipped", path: plainKey };
+    }
+
     let localStat: Entity | null = null;
     try {
       localStat = await fsLocal.stat(plainKey);
@@ -232,7 +259,11 @@ export async function fastPullChange(
       localStat = null;
     }
 
-    if (localStat !== null && localStat.mtimeCli !== undefined && !isMTimeEqual(localStat.mtimeCli, change.mtime, 1500)) {
+    if (
+      localStat !== null &&
+      localStat.mtimeCli !== undefined &&
+      !isMTimeEqual(localStat.mtimeCli, change.mtime, 1500)
+    ) {
       if (localStat.mtimeCli > change.mtime + 1500) {
         // Local copy was modified after the remote deletion; keep it and let the
         // next full sync push it back instead of silently discarding the edit.
