@@ -270,6 +270,35 @@ export const getRandomArrayBuffer = (byteLength: number) => {
 };
 
 /**
+ * Normalizes a user-entered sync server address: trims, drops trailing
+ * slashes, and assumes https (http only for local addresses). Returns null
+ * when the input cannot be a valid http(s) URL.
+ */
+export const normalizeServerUrl = (input: string): string | null => {
+  let url = (input || "").trim();
+  if (url === "") {
+    return null;
+  }
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(url)) {
+    const isLocal = /^(localhost|127\.0\.0\.1|\[::1\]|0\.0\.0\.0)(:\d+)?(\/|$)/i.test(url);
+    url = `${isLocal ? "http" : "https"}://${url}`;
+  }
+  url = url.replace(/\/+$/, "");
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return null;
+    }
+    if (!parsed.hostname) {
+      return null;
+    }
+    return url;
+  } catch {
+    return null;
+  }
+};
+
+/**
  * https://stackoverflow.com/questions/958908
  * @param x
  * @returns

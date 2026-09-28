@@ -138,7 +138,7 @@ export class CloudSyncSettingTab extends PluginSettingTab {
       type: "url",
       cls: "auth-input",
       value: this.serverUrlInput,
-      placeholder: "https://my-sync.workers.dev or https://sync.myvps.com",
+      placeholder: "cloudsync.example.workers.dev (https:// optional)",
     });
     urlInputEl.oninput = (e) => {
       this.serverUrlInput = (e.target as HTMLInputElement).value.trim();
@@ -161,9 +161,10 @@ export class CloudSyncSettingTab extends PluginSettingTab {
   }
 
   private async handleConnectWorker() {
-    const url = (this.serverUrlInput || "").trim().replace(/\/+$/, "");
-    if (!url || !url.startsWith("http")) {
-      this.errorMessage = "Please enter a valid server URL starting with http:// or https://";
+    const url = normalizeServerUrl(this.serverUrlInput);
+    if (!url) {
+      this.errorMessage =
+        "Please enter a valid server address, e.g. cloudsync.example.workers.dev";
       this.display();
       return;
     }
@@ -663,8 +664,12 @@ export class CloudSyncSettingTab extends PluginSettingTab {
       return;
     }
 
-    if (this.recoveryMethod === "totp" && (!this.totpCodeInput || this.totpCodeInput.length !== 6)) {
-      this.errorMessage = "Please enter the 6-digit 2FA code from your authenticator app.";
+    if (
+      this.recoveryMethod === "totp" &&
+      (!this.totpCodeInput || this.totpCodeInput.length !== 6)
+    ) {
+      this.errorMessage =
+        "Please enter the 6-digit 2FA code from your authenticator app.";
       this.display();
       return;
     }
@@ -675,70 +680,57 @@ export class CloudSyncSettingTab extends PluginSettingTab {
       return;
     }
 
-    if (
-      !confirm(
-        "Resetting your password changes the key used to encrypt your notes.\n\n" +
-          "Notes that were encrypted with the previous password cannot be decrypted afterwards. " +
-          "Only continue if you still know the old password, or accept losing access to the existing encrypted remote notes."
-      )
-    ) {
-      return;
-    }
-
     this.isLoading = true;
     this.errorMessage = null;
     this.display();
 
     const cs = this.plugin.settings.cloudsync;
     try {
-      const { authVerifier, encryptionKey } = await deriveZeroKnowledgeKeys(
-        this.usernameInput,
-        this.passwordInput
+      const scheme = await this.plugin.keyManager.accountScheme(
+        this.usernameInput
       );
-
-      const payload: Record<string, any> = {
-        username: this.usernameInput,
-        newVerifier: authVerifier,
-      };
-
-      if (this.recoveryMethod === "totp") {
-        payload.totpCode = this.totpCodeInput;
-      } else {
-        payload.recoveryVerifier = await deriveRecoveryVerifier(this.recoveryKeyInput);
-      }
-
-      const res = await requestUrl({
-        url: `${cs.serverUrl}/api/auth/recover`,
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(payload),
-        throw: false,
-      });
-
-      if (res.status !== 200) {
-        this.errorMessage = getResponseError(
-          res,
-          "Password reset failed. Please check your verification code."
-        );
+      if (scheme !== 2) {
         this.isLoading = false;
+        this.errorMessage =
+          "This account was created with an older version of CloudSync. Please register a new account.";
         this.display();
         return;
       }
-
-      cs.token = res.json?.token;
-      cs.sessionExpired = false;
-      this.errorMessage = null;
-      cs.userId = res.json.user?.id || "";
-      cs.username = this.usernameInput;
+      if (this.recoveryMethod === "key") {
+        if (
+          !confirm(
+            "Reset your password with the recovery key?\n\nYour notes stay readable: the recovery key unlocks your vault keys."
+          )
+        ) {
+          this.isLoading = false;
+          this.display();
+          return;
+        }
+        await this.plugin.keyManager.recoverWithRecoveryKey({
+          username: this.usernameInput,
+          recoveryKey: this.recoveryKeyInput,
+          newPassword: this.passwordInput,
+        });
+      } else {
+        if (
+          !confirm(
+            "Reset your password with a 2FA code?\n\nWARNING: this cannot restore your vault keys. Existing encrypted notes will be permanently unreadable.\n\nOnly continue if you have lost the recovery key."
+          )
+        ) {
+          this.isLoading = false;
+          this.display();
+          return;
+        }
+        await this.plugin.keyManager.recoverWithTotp({
+          username: this.usernameInput,
+          totpCode: this.totpCodeInput,
+          newPassword: this.passwordInput,
+        });
+      }
       cs.vaultId = this.app.vault.getName();
-      cs.encryptionKey = encryptionKey;
-      cs.has2FA = Boolean(res.json.has2FA !== undefined ? res.json.has2FA : true);
-      this.plugin.settings.password = encryptionKey;
       this.plugin.settings.encryptionMethod = "rclone-base64";
-
       await this.plugin.saveSettings();
       await this.plugin.autoRegisterDevice();
-
       new Notice("Password updated. Signed in.");
       this.isLoading = false;
       this.isRecoveryMode = false;
@@ -1013,30 +1005,28 @@ export class CloudSyncSettingTab extends PluginSettingTab {
               btn.setDisabled(true);
               try {
                 const newKey = generateRecoveryKey();
-                const recoveryVerifier = await deriveRecoveryVerifier(newKey);
-                const res = await requestUrl({
-                  url: `${cs.serverUrl}/api/user/recovery-key`,
-                  method: "POST",
-                  headers: {
-                    Authorization: `Bearer ${cs.token}`,
-                    "Content-Type": "application/json",
-                  },
-                  body: JSON.stringify({ recoveryVerifier }),
-                  throw: false,
-                });
-                if (res.status !== 200) {
-                  new Notice(res.json?.error || "Failed to store recovery key.");
-                  btn.setDisabled(false);
-                  return;
-                }
-                cs.recoveryKey = newKey;
-                await this.plugin.saveSettings();
-                new RecoveryKeyModal(this.app, newKey, () => this.display()).open();
+                await this.plugin.keyManager.enableRecoveryKey(newKey);
+                new RecoveryKeyModal(this.app, newKey, () =>
+                  this.display()
+                ).open();
               } catch (err: any) {
                 new Notice(`Error: ${err?.message || err}`);
                 btn.setDisabled(false);
               }
             });
+        });
+
+      new Setting(containerEl)
+        .setName("Password")
+        .setDesc(
+          "Change your account password. Vault keys are re-wrapped, so your notes stay readable."
+        )
+        .addButton((btn) => {
+          btn.setButtonText("Change password").onClick(() => {
+            new ChangePasswordModal(this.app, this.plugin, () =>
+              this.display()
+            ).open();
+          });
         });
     }
 
