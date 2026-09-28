@@ -189,12 +189,13 @@ export class CloudSyncSettingTab extends PluginSettingTab {
         });
 
         if (rootRes.status !== 200 || !rootRes.json?.service) {
-          throw new Error("Target server does not appear to be a CloudSync server.");
+          throw new Error(
+            "Target server does not appear to be a CloudSync server."
+          );
         }
       }
 
-      const mode =
-        infoRes.json?.mode === "single" ? "single" : "multi";
+      const mode = infoRes.json?.mode === "single" ? "single" : "multi";
 
       this.plugin.settings.cloudsync.serverUrl = url;
       this.plugin.settings.cloudsync.mode = mode;
@@ -452,8 +453,8 @@ export class CloudSyncSettingTab extends PluginSettingTab {
         text: this.isLoading
           ? "Connecting..."
           : this.isRegisterMode
-          ? "Create account"
-          : "Sign in",
+            ? "Create account"
+            : "Sign in",
       });
       submitBtn.disabled = this.isLoading;
       submitBtn.onclick = () => this.handleMultiAuthSubmit();
@@ -767,7 +768,9 @@ export class CloudSyncSettingTab extends PluginSettingTab {
       new Setting(containerEl)
         .setClass("banner-2fa")
         .setName("Two-factor authentication is not enabled")
-        .setDesc("Protect your account from unauthorized access and enable verification.")
+        .setDesc(
+          "Protect your account from unauthorized access and enable verification."
+        )
         .addButton((btn) => {
           btn
             .setButtonText("Set up 2FA")
@@ -781,12 +784,13 @@ export class CloudSyncSettingTab extends PluginSettingTab {
     }
 
     // 1. Account & Server
-    new Setting(containerEl)
-      .setName("Account & Server")
-      .setHeading();
+    new Setting(containerEl).setName("Account & Server").setHeading();
 
     // 1. Unified Profile Info Card (Native Obsidian Setting)
-    const effectiveName = cs.displayName || cs.username || (cs.mode === "single" ? "Personal Worker" : "User");
+    const effectiveName =
+      cs.displayName ||
+      cs.username ||
+      (cs.mode === "single" ? "Personal Worker" : "User");
     const initial = (effectiveName || "U").charAt(0).toUpperCase();
 
     let serverHost = "";
@@ -804,7 +808,9 @@ export class CloudSyncSettingTab extends PluginSettingTab {
 
     profileSetting.settingEl.addClass("profile-setting-item");
 
-    const avatarWrapper = profileSetting.infoEl.createDiv({ cls: "profile-setting-avatar" });
+    const avatarWrapper = profileSetting.infoEl.createDiv({
+      cls: "profile-setting-avatar",
+    });
     if (cs.serverUrl && cs.username) {
       const avatarImg = avatarWrapper.createEl("img", {
         attr: {
@@ -833,7 +839,9 @@ export class CloudSyncSettingTab extends PluginSettingTab {
       });
     }
 
-    const detailsWrapper = profileSetting.infoEl.createDiv({ cls: "profile-setting-details" });
+    const detailsWrapper = profileSetting.infoEl.createDiv({
+      cls: "profile-setting-details",
+    });
     detailsWrapper.appendChild(profileSetting.nameEl);
     detailsWrapper.appendChild(profileSetting.descEl);
 
@@ -842,11 +850,11 @@ export class CloudSyncSettingTab extends PluginSettingTab {
 
     if (cs.username) {
       profileSetting.addButton((btn) => {
-        btn
-          .setButtonText("Edit profile")
-          .onClick(() => {
-            new EditProfileModal(this.app, this.plugin, () => this.display()).open();
-          });
+        btn.setButtonText("Edit profile").onClick(() => {
+          new EditProfileModal(this.app, this.plugin, () =>
+            this.display()
+          ).open();
+        });
       });
     }
 
@@ -955,9 +963,14 @@ export class CloudSyncSettingTab extends PluginSettingTab {
               .setButtonText("Set up")
               .setCta()
               .onClick(() => {
-                new TwoFactorModal(this.app, this.plugin, "setup", (success) => {
-                  if (success) this.display();
-                }).open();
+                new TwoFactorModal(
+                  this.app,
+                  this.plugin,
+                  "setup",
+                  (success) => {
+                    if (success) this.display();
+                  }
+                ).open();
               });
           }
         });
@@ -1122,8 +1135,8 @@ export class CloudSyncSettingTab extends PluginSettingTab {
         !hasVault
           ? "Connect to a remote vault above to enable syncing."
           : isPaused
-          ? "Sync is currently paused."
-          : "Sync is active."
+            ? "Sync is currently paused."
+            : "Sync is active."
       )
       .addButton((btn) => {
         btn.setDisabled(!hasVault);
@@ -1139,14 +1152,12 @@ export class CloudSyncSettingTab extends PluginSettingTab {
               this.plugin.syncRun("manual");
             });
         } else {
-          btn
-            .setButtonText("Pause")
-            .onClick(async () => {
-              this.plugin.settings.isSyncPaused = true;
-              await this.plugin.saveSettings();
-              new Notice("Paused sync.");
-              this.display();
-            });
+          btn.setButtonText("Pause").onClick(async () => {
+            this.plugin.settings.isSyncPaused = true;
+            await this.plugin.saveSettings();
+            new Notice("Paused sync.");
+            this.display();
+          });
         }
       })
       .addButton((btn) => {
@@ -1182,7 +1193,10 @@ export class CloudSyncSettingTab extends PluginSettingTab {
             `${this.plugin.settings.autoRunEveryMilliseconds ?? 300000}`
           )
           .onChange(async (val) => {
-            this.plugin.settings.autoRunEveryMilliseconds = Number.parseInt(val, 10);
+            this.plugin.settings.autoRunEveryMilliseconds = Number.parseInt(
+              val,
+              10
+            );
             await this.plugin.saveSettings();
           });
       });
@@ -1204,7 +1218,9 @@ export class CloudSyncSettingTab extends PluginSettingTab {
       .setDesc("Trigger sync shortly after making edits")
       .addToggle((toggle) => {
         toggle
-          .setValue((this.plugin.settings.syncOnSaveAfterMilliseconds ?? -1) > 0)
+          .setValue(
+            (this.plugin.settings.syncOnSaveAfterMilliseconds ?? -1) > 0
+          )
           .onChange(async (val) => {
             this.plugin.settings.syncOnSaveAfterMilliseconds = val ? 3000 : -1;
             await this.plugin.saveSettings();
@@ -1225,7 +1241,9 @@ export class CloudSyncSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Conflict resolution")
-      .setDesc("Strategy when notes are independently modified on multiple devices")
+      .setDesc(
+        "Strategy when notes are independently modified on multiple devices"
+      )
       .addDropdown((drop) => {
         drop
           .addOption("keep_newer", "Keep newer version")
@@ -1250,19 +1268,18 @@ export class CloudSyncSettingTab extends PluginSettingTab {
           .addOption("10", "10 files")
           .addOption("25", "25 files")
           .addOption("50", "50 files")
-          .setValue(
-            `${this.plugin.settings.safetyDeletionThreshold ?? 25}`
-          )
+          .setValue(`${this.plugin.settings.safetyDeletionThreshold ?? 25}`)
           .onChange(async (val) => {
-            this.plugin.settings.safetyDeletionThreshold = Number.parseInt(val, 10);
+            this.plugin.settings.safetyDeletionThreshold = Number.parseInt(
+              val,
+              10
+            );
             await this.plugin.saveSettings();
           });
       });
 
     // 3. File Types & Filters
-    new Setting(containerEl)
-      .setName("File Inclusions & Filters")
-      .setHeading();
+    new Setting(containerEl).setName("File Inclusions & Filters").setHeading();
 
     const ignoredFolders = this.plugin.settings.ignorePaths || [];
     const excludedDescFrag = createFragment((f) => {
@@ -1280,11 +1297,9 @@ export class CloudSyncSettingTab extends PluginSettingTab {
       .setName("Excluded folders")
       .setDesc(excludedDescFrag)
       .addButton((btn) => {
-        btn
-          .setButtonText("Manage exclusions")
-          .onClick(() => {
-            new ExcludedFoldersModal(this.app, this.plugin).open();
-          });
+        btn.setButtonText("Manage exclusions").onClick(() => {
+          new ExcludedFoldersModal(this.app, this.plugin).open();
+        });
       });
 
     new Setting(containerEl)
@@ -1355,7 +1370,9 @@ export class CloudSyncSettingTab extends PluginSettingTab {
     initDeviceIdentity(this.plugin.settings);
     new Setting(containerEl)
       .setName("Device name")
-      .setDesc("Identifies this device in activity logs and configuration backups")
+      .setDesc(
+        "Identifies this device in activity logs and configuration backups"
+      )
       .addText((text) => {
         text
           .setPlaceholder(this.plugin.settings.deviceName || "My Device")
@@ -1380,7 +1397,9 @@ export class CloudSyncSettingTab extends PluginSettingTab {
       });
 
     const thisDeviceSetting = new Setting(containerEl)
-      .setName(`${this.plugin.settings.deviceName || "My Device"} (This device)`)
+      .setName(
+        `${this.plugin.settings.deviceName || "My Device"} (This device)`
+      )
       .setDesc(
         this.plugin.settings.lastSettingsBackupTime
           ? `Last backed up: ${new Date(
@@ -1503,9 +1522,7 @@ export class CloudSyncSettingTab extends PluginSettingTab {
                       restoreBtn.setDisabled(false);
                       restoreBtn.setButtonText("Restore to this device");
                       new Notice(
-                        `Failed to restore settings: ${
-                          err?.message || err
-                        }`
+                        `Failed to restore settings: ${err?.message || err}`
                       );
                     }
                   });
@@ -1740,11 +1757,17 @@ export class CloudSyncSettingTab extends PluginSettingTab {
           cs.has2FA = res.json.has2FA;
           await this.plugin.saveSettings();
         }
-        if (res.json?.hasAvatar !== undefined && cs.hasAvatar !== res.json.hasAvatar) {
+        if (
+          res.json?.hasAvatar !== undefined &&
+          cs.hasAvatar !== res.json.hasAvatar
+        ) {
           cs.hasAvatar = res.json.hasAvatar;
           await this.plugin.saveSettings();
         }
-        if (res.json?.displayName !== undefined && cs.displayName !== res.json.displayName) {
+        if (
+          res.json?.displayName !== undefined &&
+          cs.displayName !== res.json.displayName
+        ) {
           cs.displayName = res.json.displayName;
           await this.plugin.saveSettings();
         }

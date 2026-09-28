@@ -4,10 +4,10 @@ import { FileText, RefreshCcw, RotateCcw, createElement } from "lucide";
 import {
   Events,
   FileSystemAdapter,
+  MarkdownView,
   Menu,
   Notice,
   Platform,
-  MarkdownView,
   Plugin,
   TFile,
   TFolder,
@@ -439,10 +439,10 @@ export default class CloudSyncPlugin extends Plugin {
     const statusText = !hasVault
       ? "Not connected"
       : this.isSyncing
-      ? "Syncing..."
-      : this.settings.isSyncPaused
-      ? "Paused"
-      : "Synced";
+        ? "Syncing..."
+        : this.settings.isSyncPaused
+          ? "Paused"
+          : "Synced";
 
     menu.addItem((item) => {
       item.setTitle(`Sync: ${statusText}`).setDisabled(true);
@@ -698,7 +698,7 @@ export default class CloudSyncPlugin extends Plugin {
     ) {
       try {
         const changesRes = await fsRemote.getChanges(this.lastKnownRevision);
-        if (changesRes && changesRes.ok && !changesRes.fullScanNeeded) {
+        if (changesRes?.ok && !changesRes.fullScanNeeded) {
           if (changesRes.changes && changesRes.changes.length > 0) {
             await this.runFastPull(changesRes.changes);
           }
@@ -720,7 +720,10 @@ export default class CloudSyncPlugin extends Plugin {
           return;
         }
       } catch (err) {
-        console.warn("CloudSync: Fast sync check failed, falling back to full sync", err);
+        console.warn(
+          "CloudSync: Fast sync check failed, falling back to full sync",
+          err
+        );
       }
     }
 
@@ -883,12 +886,14 @@ export default class CloudSyncPlugin extends Plugin {
         new Notice("Imported settings rejected: invalid server URL.");
         return;
       }
-      if (!confirm(
-        `Import settings from this link?\n\n` +
-          `Server: ${importedUrl || "(none)"}\n` +
-          `Account: ${imported.cloudsync?.username || "(none)"}\n\n` +
-          `This will replace your sync configuration and may sign you in to the server above.`,
-      )) {
+      if (
+        !confirm(
+          `Import settings from this link?\n\n` +
+            `Server: ${importedUrl || "(none)"}\n` +
+            `Account: ${imported.cloudsync?.username || "(none)"}\n\n` +
+            `This will replace your sync configuration and may sign you in to the server above.`
+        )
+      ) {
         return;
       }
 
@@ -1145,7 +1150,8 @@ export default class CloudSyncPlugin extends Plugin {
     // Pause polling while offline or app is hidden/minimized
     if (
       (typeof navigator !== "undefined" && !navigator.onLine) ||
-      (typeof document !== "undefined" && document.visibilityState !== "visible")
+      (typeof document !== "undefined" &&
+        document.visibilityState !== "visible")
     ) {
       return;
     }
@@ -1299,7 +1305,9 @@ export default class CloudSyncPlugin extends Plugin {
     } catch (err: any) {
       const errMsg = err?.message || `${err}`;
       if (errMsg.includes("401") || errMsg.includes("Unauthorized")) {
-        console.warn("CloudSync: Session expired during live pulse, pausing background pulse.");
+        console.warn(
+          "CloudSync: Session expired during live pulse, pausing background pulse."
+        );
         await this.markSessionExpired().catch(() => {});
         if (this.livePulseTimeoutID) {
           window.clearTimeout(this.livePulseTimeoutID);
@@ -1408,7 +1416,10 @@ export default class CloudSyncPlugin extends Plugin {
         }
       }
     } catch (err: any) {
-      console.error("CloudSync: Fast pull error, falling back to full sync:", err);
+      console.error(
+        "CloudSync: Fast pull error, falling back to full sync:",
+        err
+      );
       this.isFastSyncing = false;
       await this.syncRun("auto");
     } finally {
@@ -1432,15 +1443,18 @@ export default class CloudSyncPlugin extends Plugin {
     }
 
     if (isHiddenPath(path, true, false)) return true;
-    if (!this.settings.syncUnderscoreItems && isHiddenPath(path, false, true)) return true;
-    if (isSpecialFolderNameToSkip(path, this.settings.ignorePaths ?? [])) return true;
+    if (!this.settings.syncUnderscoreItems && isHiddenPath(path, false, true))
+      return true;
+    if (isSpecialFolderNameToSkip(path, this.settings.ignorePaths ?? []))
+      return true;
     return false;
   }
 
   onVaultModified(path: string, isDeletion = false) {
     this.lastUserActivityTime = Date.now();
-    if (this.isSyncing || this.isFastSyncing) return;
-    if (!this.settings.cloudsync?.token || !this.settings.cloudsync?.vaultId) return;
+    if (this.isSyncing || this.isFastSyncing || this.isRotating) return;
+    if (!this.settings.cloudsync?.token || !this.settings.cloudsync?.vaultId)
+      return;
     if (this.shouldIgnorePath(path)) return;
 
     // Only an explicit deletion event may propagate a remote delete. This avoids
@@ -1552,7 +1566,10 @@ export default class CloudSyncPlugin extends Plugin {
         );
       }
     } catch (err: any) {
-      console.error("CloudSync: Fast push error, falling back to full sync:", err);
+      console.error(
+        "CloudSync: Fast push error, falling back to full sync:",
+        err
+      );
       this.isFastSyncing = false;
       await this.syncRun("auto_sync_on_save");
     } finally {
