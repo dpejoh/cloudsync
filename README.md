@@ -82,7 +82,18 @@ Server runs on port `3000` with data stored in `./data`.
 CloudSync uses **Username + Password + TOTP (2FA)** instead of email:
 
 - **Zero email dependencies**: No transactional mail services (Resend, SendGrid) or VPS mail daemons required. Deployments stay completely self-contained.
-- **Save your 2FA token**: There is no email password reset. With zero-knowledge encryption, if you lose your password or 2FA token, your vault cannot be recovered.
+- **Save your recovery key**: Registration generates a recovery key used to reset your password if you lose your authenticator app. It is shown once and stored locally; keep it offline. Password reset works with either the recovery key or a TOTP code.
+- **Encryption caveat**: resetting your password derives a new encryption key. Notes encrypted with the old password remain unreadable unless you still know the old password. With zero-knowledge encryption there is no server-side recovery of note contents.
+
+---
+
+## Security Notes
+
+- **Server secret**: deployments require `JWT_SECRET` (Cloudflare secret or VPS env var). The backend refuses authenticated traffic when it is missing, so a misconfigured instance fails closed instead of accepting forged tokens.
+- **Encrypted-mode limits**: the server never sees note contents or file names, but it necessarily sees object counts, approximate sizes, timestamps, and access patterns.
+- **Server-initiated tampering**: with the default `rclone-base64` mode, content is authenticated (tampering is detected), but a malicious server can still replay or delete whole objects. The legacy `openssl-base64` mode is unauthenticated and should not be used for new vaults.
+- **Limits**: 100 MB per object, 10 GB per account, cloud trash retained 30 days, up to 50 history versions per file (2 MB each).
+- **VPS**: always run behind HTTPS; `docker compose` starts the server as an unprivileged user with `no-new-privileges`.
 
 ---
 
