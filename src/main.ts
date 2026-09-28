@@ -177,6 +177,7 @@ export default class CloudSyncPlugin extends Plugin {
   lastKnownRevision = 0;
 
   presenceManager!: PresenceManager;
+  settingTab?: CloudSyncSettingTab;
   lastLocalCursor: { path: string; line: number; ch: number } | null = null;
 
   syncLogs: SyncLogEntry[] = [];
@@ -349,8 +350,27 @@ export default class CloudSyncPlugin extends Plugin {
           cs.has2FA = res.json.has2FA;
           await this.saveSettings();
         }
+      } else if (res.status === 401) {
+        await this.markSessionExpired();
       }
     } catch {}
+  }
+
+  /**
+   * The server rejected the stored token. Keep the token (so the derived profileID
+   * and local prev-sync records survive) but flag the session so the settings UI
+   * shows the login screen instead of pretending to be signed in.
+   */
+  async markSessionExpired() {
+    const cs = this.settings.cloudsync;
+    if (!cs?.token || cs.sessionExpired) return;
+    cs.sessionExpired = true;
+    await this.saveSettings();
+    // Deferred so we never re-render the settings tab in the middle of an
+    // in-flight render that detected the 401.
+    window.setTimeout(() => {
+      this.settingTab?.display().catch(() => {});
+    }, 0);
   }
 
   openStatusIconMenu(e: MouseEvent) {
@@ -474,6 +494,11 @@ export default class CloudSyncPlugin extends Plugin {
       return;
     }
 
+    // Don't spam 401 notices on background syncs after the session expired.
+    if (this.settings.cloudsync.sessionExpired && triggerSource !== "manual") {
+      return;
+    }
+
     if (!this.settings.cloudsync.token) {
       new Notice("Please log in to start syncing.");
       return;
@@ -507,6 +532,9 @@ export default class CloudSyncPlugin extends Plugin {
     const errNotifyFunc = async (s: SyncTriggerSourceType, err: any) => {
       const errMsg = err?.message || `${err}`;
       const isAuthError = errMsg.includes("401") || errMsg.includes("Unauthorized");
+      if (isAuthError) {
+        await this.markSessionExpired().catch(() => {});
+      }
       this.addSyncLog({
         type: "error",
         message: isAuthError
@@ -880,7 +908,8 @@ export default class CloudSyncPlugin extends Plugin {
       },
     });
 
-    this.addSettingTab(new CloudSyncSettingTab(this.app, this));
+    this.settingTab = new CloudSyncSettingTab(this.app, this);
+    this.addSettingTab(this.settingTab);
 
     this.enableCheckingFileStat();
 
@@ -1107,6 +1136,7 @@ export default class CloudSyncPlugin extends Plugin {
       const errMsg = err?.message || `${err}`;
       if (errMsg.includes("401") || errMsg.includes("Unauthorized")) {
         console.warn("CloudSync: Session expired during live pulse, pausing background pulse.");
+        await this.markSessionExpired().catch(() => {});
         if (this.livePulseTimeoutID) {
           window.clearTimeout(this.livePulseTimeoutID);
           this.livePulseTimeoutID = undefined;

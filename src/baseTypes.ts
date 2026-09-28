@@ -10,6 +10,8 @@ export interface CloudSyncConfig {
   displayName?: string;
   email?: string; // backwards compatibility
   token: string;
+  /** Set when the server rejects the token (401); cleared on successful login. */
+  sessionExpired?: boolean;
   vaultId: string;
   vaultOwner?: string;
   userId: string;

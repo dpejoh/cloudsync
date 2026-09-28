@@ -78,6 +78,7 @@ export class CloudSyncSettingTab extends PluginSettingTab {
     const isConfigured = Boolean(cs.serverUrl);
     const isAuthenticated =
       Boolean(cs.token) &&
+      !cs.sessionExpired &&
       Boolean(cs.username || cs.email || cs.userId === "default");
 
     if (!isConfigured) {
@@ -85,6 +86,9 @@ export class CloudSyncSettingTab extends PluginSettingTab {
       this.renderServerUrlView(containerEl);
     } else if (!isAuthenticated) {
       containerEl.addClass("is-auth-active");
+      if (cs.sessionExpired && !this.errorMessage) {
+        this.errorMessage = "Your session expired. Please sign in again.";
+      }
       this.renderAuthView(containerEl);
     } else {
       containerEl.removeClass("is-auth-active");
@@ -578,6 +582,8 @@ export class CloudSyncSettingTab extends PluginSettingTab {
       }
 
       cs.token = res.json.token;
+      cs.sessionExpired = false;
+      this.errorMessage = null;
       cs.userId = "default";
       cs.username = "Owner";
       cs.vaultId = this.app.vault.getName();
@@ -639,6 +645,8 @@ export class CloudSyncSettingTab extends PluginSettingTab {
         }
 
         cs.token = res.json?.token;
+        cs.sessionExpired = false;
+        this.errorMessage = null;
         cs.userId = res.json?.user?.id || "";
         cs.username = this.usernameInput;
         cs.vaultId = this.app.vault.getName();
@@ -688,6 +696,8 @@ export class CloudSyncSettingTab extends PluginSettingTab {
         }
 
         cs.token = res.json.token;
+        cs.sessionExpired = false;
+        this.errorMessage = null;
         cs.userId = res.json.user?.id || "";
         cs.username = this.usernameInput;
         cs.vaultId = this.app.vault.getName();
@@ -779,6 +789,8 @@ export class CloudSyncSettingTab extends PluginSettingTab {
       }
 
       cs.token = res.json?.token;
+      cs.sessionExpired = false;
+      this.errorMessage = null;
       cs.userId = res.json.user?.id || "";
       cs.username = this.usernameInput;
       cs.vaultId = this.app.vault.getName();
@@ -806,6 +818,10 @@ export class CloudSyncSettingTab extends PluginSettingTab {
     const vaultName = cs.vaultId || this.app.vault.getName();
 
     await this.fetchStorageUsage();
+    if (this.plugin.settings.cloudsync.sessionExpired) {
+      // fetchStorageUsage detected a 401 and queued an auth-view refresh.
+      return;
+    }
 
     if (this.plugin.settings.encryptionMethod === "openssl-base64") {
       new Setting(containerEl)
@@ -916,6 +932,7 @@ export class CloudSyncSettingTab extends PluginSettingTab {
           cs.displayName = "";
           cs.email = "";
           cs.encryptionKey = "";
+          cs.sessionExpired = false;
           cs.vaultId = "";
           this.plugin.settings.password = "";
           this.plugin.clearCachedClients();
@@ -1669,6 +1686,8 @@ export class CloudSyncSettingTab extends PluginSettingTab {
           cs.displayName = res.json.displayName;
           await this.plugin.saveSettings();
         }
+      } else if (res.status === 401) {
+        await this.plugin.markSessionExpired();
       }
     } catch {
       // Ignore background storage check failure
