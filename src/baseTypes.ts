@@ -1,3 +1,4 @@
+import type { AccountKeyMaterial, KdfDescriptor } from "./cryptoV2";
 import type { LangTypeAndAuto } from "./i18n";
 
 export const DEFAULT_CONTENT_TYPE = "application/octet-stream";
@@ -19,12 +20,25 @@ export interface CloudSyncConfig {
   has2FA?: boolean;
   hasAvatar?: boolean;
   recoveryKey?: string;
-  encryptionKey?: string;
+  /** Protocol v2: 1 = legacy password-derived key, 2 = random master key. */
+  scheme?: 1 | 2;
+  kdf?: KdfDescriptor;
+  /** Hex-encoded key-encryption key (derived from the password) for v2 accounts. */
+  kek?: string;
+  /** Cached (still encrypted) key material document for offline unlock. */
+  keyMaterial?: AccountKeyMaterial;
+  /** Last re-key failure message, shown in settings for troubleshooting. */
+  lastRotationError?: string;
+  /** Last observed re-key progress, so the UI can show it after a reload. */
+  lastRotationProgress?: { message: string; updatedAt: number };
   autoSyncIntervalMinutes?: number;
   syncOnStartup?: boolean;
   syncOnSave?: boolean;
   deviceId?: string;
   deviceName?: string;
+  /** Account/vault the local sync database belongs to; a change resets it. */
+  lastConnectedUserId?: string;
+  lastConnectedVaultId?: string;
 }
 
 export const DEFAULT_CLOUDSYNC_CONFIG: CloudSyncConfig = {
@@ -36,7 +50,6 @@ export const DEFAULT_CLOUDSYNC_CONFIG: CloudSyncConfig = {
   vaultOwner: "",
   userId: "",
   mode: "multi",
-  encryptionKey: "",
   autoSyncIntervalMinutes: 5,
   syncOnStartup: true,
   syncOnSave: true,
@@ -61,7 +74,6 @@ export interface ProfilerConfig {
 
 export interface RemotelySavePluginSettings {
   cloudsync: CloudSyncConfig;
-  password: string; // Used as E2EE master key
   serviceType: SUPPORTED_SERVICES_TYPE;
   currLogLevel?: string;
   autoRunEveryMilliseconds?: number;

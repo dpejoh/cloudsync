@@ -20,41 +20,38 @@ import type {
   RemotelySavePluginSettings,
   SyncTriggerSourceType,
 } from "./baseTypes";
-import type { SyncLogEntry } from "./syncLogModal";
-import { SyncLogModal } from "./syncLogModal";
-import { DeletedFilesModal } from "./deletedFilesModal";
-import { VersionHistoryModal } from "./versionHistoryModal";
-import { VaultPickerModal } from "./vaultPickerModal";
 import {
   COMMAND_URI,
   DEFAULT_CLOUDSYNC_CONFIG,
   DEFAULT_DEBUG_FOLDER,
   DEFAULT_DEVICE_CONFIGS_FOLDER,
 } from "./baseTypes";
+import { messyConfigToNormal, normalConfigToMessy } from "./configPersist";
+import { vaultKeyToPassword } from "./cryptoV2";
+import { exportVaultSyncPlansToFiles } from "./debugMode";
+import { DeletedFilesModal } from "./deletedFilesModal";
 import {
-  initDeviceIdentity,
   backupDeviceSettings,
+  initDeviceIdentity,
   restoreDeviceSettings,
 } from "./deviceSettings";
-import { messyConfigToNormal, normalConfigToMessy } from "./configPersist";
-import { exportVaultSyncPlansToFiles } from "./debugMode";
 import { fastPullChange, fastPushPath } from "./fastSync";
 import { FakeFsEncrypt } from "./fsEncrypt";
 import { getClient } from "./fsGetter";
 import { FakeFsLocal } from "./fsLocal";
 import { FakeFsWorker, type VaultChangeItem } from "./fsWorker";
-import { PresenceManager } from "./presenceManager";
 import { I18n } from "./i18n";
 import type { LangTypeAndAuto, TransItemType } from "./i18n";
 import { importQrCodeUri } from "./importExport";
+import { AccountKeyManager } from "./keyManager";
 import {
   type InternalDBs,
   clearAllLoggerOutputRecords,
   clearExpiredSyncPlanRecords,
-  getLatestVaultRevision,
+  destroyDBs,
   getLastFailedSyncTimeByVault,
   getLastSuccessSyncTimeByVault,
-  destroyDBs,
+  getLatestVaultRevision,
   prepareDBs,
   saveLatestVaultRevision,
   upsertLastFailedSyncTimeByVault,
@@ -66,13 +63,18 @@ import {
   isHiddenPath,
   isSpecialFolderNameToSkip,
 } from "./misc";
+import { PresenceManager } from "./presenceManager";
 import { DEFAULT_PROFILER_CONFIG, Profiler } from "./profiler";
+import { runVaultRekey } from "./rotationUi";
 import { CloudSyncSettingTab } from "./settings";
 import { syncer } from "./sync";
+import type { SyncLogEntry } from "./syncLogModal";
+import { SyncLogModal } from "./syncLogModal";
+import { VaultPickerModal } from "./vaultPickerModal";
+import { VersionHistoryModal } from "./versionHistoryModal";
 
 const DEFAULT_SETTINGS: RemotelySavePluginSettings = {
   cloudsync: DEFAULT_CLOUDSYNC_CONFIG,
-  password: "",
   serviceType: "cloudsync",
   currLogLevel: "info",
   autoRunEveryMilliseconds: 300000, // 5 min
@@ -165,6 +167,8 @@ export default class CloudSyncPlugin extends Plugin {
   cachedFsEncryptPassword?: string;
   cachedFsEncryptMethod?: string;
 
+  keyManager!: AccountKeyManager;
+
   debouncePushTimer?: number;
   pendingModifiedPaths: Set<string> = new Set<string>();
   pendingDeletedPaths: Set<string> = new Set<string>();
@@ -220,7 +224,13 @@ export default class CloudSyncPlugin extends Plugin {
     this.cachedFsEncryptMethod = undefined;
   }
 
-  getOrCreateClients() {
+  isUnlockedForSync(): boolean {
+    return (
+      this.settings.cloudsync?.scheme === 2 && !!this.keyManager?.isUnlocked
+    );
+  }
+
+  async getOrCreateClients() {
     const vaultName = this.app.vault.getName();
     const profileID = this.getCurrProfileID();
     const cs = this.settings.cloudsync;
@@ -282,9 +292,55 @@ export default class CloudSyncPlugin extends Plugin {
       );
     }
 
+    // Each vault has its own random key, delivered through the account key
+    // material (owned vaults) or an owner-issued envelope (shared vaults).
+    // Callers must check `isUnlockedForSync()` first; when locked we fall back
+    // to an empty password so nothing is ever written unencrypted.
+    let effectivePassword = "";
+    let integrityKey: Uint8Array | undefined;
+    if (cs.scheme === 2 && cs.vaultId && this.keyManager?.isUnlocked) {
+      const isSharedVault =
+        !!cs.vaultOwner &&
+        cs.vaultOwner.toLowerCase() !== (cs.username || "").toLowerCase();
+      let vaultKey = await this.keyManager.getVaultKey(cs.vaultId);
+      if (!vaultKey && isSharedVault) {
+        const opened = await this.keyManager.fetchSharedVaultKey({
+          vaultId: cs.vaultId,
+          ownerUsername: cs.vaultOwner!,
+        });
+        if (opened) vaultKey = opened.vk;
+      }
+      if (!vaultKey && !isSharedVault) {
+        const remoteFiles = await this.cachedFsRemote.walk();
+        const hasExistingData = remoteFiles.some(
+          (entity) =>
+            !entity.keyRaw.startsWith(".cloudsync") &&
+            !entity.keyRaw.startsWith("_device_configs")
+        );
+        if (hasExistingData) {
+          throw new Error(
+            "This vault was created with an older version of CloudSync. Create a new remote vault instead."
+          );
+        }
+        vaultKey = await this.keyManager.ensureOwnedVaultKey(cs.vaultId);
+      }
+      if (!vaultKey) {
+        throw new Error(
+          "The owner has not shared the vault key with your account yet."
+        );
+      }
+      effectivePassword = vaultKeyToPassword(vaultKey);
+      integrityKey =
+        (await this.keyManager.integrityKey(cs.vaultId)) ?? undefined;
+    }
+    this.cachedFsRemote?.setIntegrityKey(integrityKey);
+    this.cachedFsRemote?.setKeyVersion(
+      cs.vaultId ? this.keyManager?.vaultKeyVersion(cs.vaultId) : undefined
+    );
+
     if (
       !this.cachedFsEncrypt ||
-      this.cachedFsEncryptPassword !== this.settings.password ||
+      this.cachedFsEncryptPassword !== effectivePassword ||
       this.cachedFsEncryptMethod !== this.settings.encryptionMethod
     ) {
       if (this.cachedFsEncrypt) {
@@ -292,12 +348,12 @@ export default class CloudSyncPlugin extends Plugin {
           this.cachedFsEncrypt.closeResources();
         } catch {}
       }
-      this.cachedFsEncryptPassword = this.settings.password;
+      this.cachedFsEncryptPassword = effectivePassword;
       this.cachedFsEncryptMethod =
         this.settings.encryptionMethod || "rclone-base64";
       this.cachedFsEncrypt = new FakeFsEncrypt(
         this.cachedFsRemote,
-        this.settings.password,
+        effectivePassword,
         this.settings.encryptionMethod || "rclone-base64"
       );
     }
@@ -312,6 +368,7 @@ export default class CloudSyncPlugin extends Plugin {
 
   async autoRegisterDevice(force = false) {
     if (!this.settings.cloudsync?.token) return;
+    if (!this.isUnlockedForSync()) return;
     const now = Date.now();
     if (!force && now - this.lastDeviceHeartbeat < 6 * 3600 * 1000) {
       return;
@@ -319,7 +376,7 @@ export default class CloudSyncPlugin extends Plugin {
     this.lastDeviceHeartbeat = now;
 
     initDeviceIdentity(this.settings);
-    const { fsRemote } = this.getOrCreateClients();
+    const { fsRemote } = await this.getOrCreateClients();
     if (fsRemote && typeof (fsRemote as any).registerDevice === "function") {
       try {
         await fsRemote.registerDevice({
@@ -509,12 +566,18 @@ export default class CloudSyncPlugin extends Plugin {
       return;
     }
 
+    if (!this.isUnlockedForSync()) {
+      new Notice("CloudSync is locked. Please sign in again.");
+      return;
+    }
+
     this.addSyncLog({
       type: "info",
       message: `Sync started (${triggerSource})`,
     });
 
-    const { fsLocal, fsRemote, fsEncrypt, profileID } = this.getOrCreateClients();
+    const { fsLocal, fsRemote, fsEncrypt, profileID } =
+      await this.getOrCreateClients();
 
     const markIsSyncingFunc = (status: boolean) => {
       this.isSyncing = status;
@@ -722,6 +785,43 @@ export default class CloudSyncPlugin extends Plugin {
 
     await this.loadSettings();
 
+    this.keyManager = new AccountKeyManager({
+      transport: {
+        request: async (path, opts) => {
+          const base = (this.settings.cloudsync.serverUrl || "").replace(
+            /\/+$/,
+            ""
+          );
+          const headers: Record<string, string> = { ...(opts?.headers ?? {}) };
+          if (opts?.token) headers.Authorization = `Bearer ${opts.token}`;
+          let body: string | undefined;
+          if (opts?.body !== undefined) {
+            headers["content-type"] = "application/json";
+            body = JSON.stringify(opts.body);
+          }
+          const res = await requestUrl({
+            url: `${base}${path}`,
+            method: opts?.method ?? "GET",
+            headers,
+            body,
+            throw: false,
+          });
+          return {
+            status: res.status,
+            json: res.json,
+            text: res.text,
+            headers: res.headers,
+            arrayBuffer: res.arrayBuffer,
+          };
+        },
+      },
+      config: this.settings.cloudsync,
+      persist: async () => {
+        await this.saveSettings();
+      },
+    });
+    await this.keyManager.unlockFromCache().catch(() => {});
+
     const profileID: string = this.getCurrProfileID();
 
     this.i18n = new I18n(this.settings.lang!, async (lang: LangTypeAndAuto) => {
@@ -732,12 +832,27 @@ export default class CloudSyncPlugin extends Plugin {
     const vaultBasePath = this.getVaultBasePath();
     const vaultRandomIDFromOld = await this.getVaultRandomIDFromOldConfigFile();
 
-    if (!this.settings.cloudsync?.token) {
+    const csAtLoad = this.settings.cloudsync;
+    const accountChanged =
+      !!csAtLoad?.token &&
+      (csAtLoad.lastConnectedUserId !== csAtLoad.userId ||
+        csAtLoad.lastConnectedVaultId !== csAtLoad.vaultId);
+    if (!csAtLoad?.token || accountChanged) {
       try {
         await destroyDBs();
+        if (accountChanged) {
+          console.warn(
+            "CloudSync: account/vault changed; local sync database was reset to avoid stale comparisons."
+          );
+        }
       } catch (e) {
         console.warn("Clean state db destroy skipped:", e);
       }
+    }
+    if (csAtLoad?.token) {
+      csAtLoad.lastConnectedUserId = csAtLoad.userId;
+      csAtLoad.lastConnectedVaultId = csAtLoad.vaultId;
+      await this.saveSettings();
     }
 
     await this.prepareDBAndVaultRandomID(
@@ -870,7 +985,11 @@ export default class CloudSyncPlugin extends Plugin {
       id: "backup-device-settings",
       name: "Backup Settings for This Device to Cloud",
       callback: async () => {
-        const { fsEncrypt, fsRemote } = this.getOrCreateClients();
+        if (!this.isUnlockedForSync()) {
+          new Notice("CloudSync is locked. Please sign in again.");
+          return;
+        }
+        const { fsEncrypt, fsRemote } = await this.getOrCreateClients();
         const notice = new Notice("Backing up device settings...", 0);
         try {
           const res = await backupDeviceSettings(
@@ -968,6 +1087,7 @@ export default class CloudSyncPlugin extends Plugin {
     if (this.cachedFsEncrypt) {
       this.cachedFsEncrypt.closeResources();
     }
+    this.keyManager?.clearSecrets();
   }
 
   scheduleNextLivePulse(immediate = false) {
@@ -1460,6 +1580,46 @@ export default class CloudSyncPlugin extends Plugin {
     );
     this.db = res.db;
     this.vaultRandomID = res.vaultRandomID;
+  }
+
+  /**
+   * Wipes the local comparison state so the next sync treats every file as new
+   * instead of comparing against records from another account/vault.
+   */
+  async resetLocalSyncState(): Promise<void> {
+    if (this.isSyncing || this.isFastSyncing || this.isRotating) {
+      new Notice("Wait for the current operation to finish before resetting.");
+      return;
+    }
+    try {
+      if (this.cachedFsEncrypt) {
+        try {
+          this.cachedFsEncrypt.closeResources();
+        } catch {}
+      }
+      this.clearCachedClients();
+      await destroyDBs();
+      const vaultBasePath = this.getVaultBasePath();
+      await this.prepareDBAndVaultRandomID(
+        vaultBasePath,
+        await this.getVaultRandomIDFromOldConfigFile(),
+        this.getCurrProfileID()
+      );
+      const cs = this.settings.cloudsync;
+      if (cs?.token) {
+        cs.lastConnectedUserId = cs.userId;
+        cs.lastConnectedVaultId = cs.vaultId;
+        await this.saveSettings();
+      }
+      new Notice(
+        "Local sync database reset. The next sync compares everything fresh (nothing is deleted).",
+        8000
+      );
+    } catch (err: any) {
+      new Notice(
+        `Could not reset the local sync database: ${err?.message || err}`
+      );
+    }
   }
 
   enableAutoSyncIfSet() {

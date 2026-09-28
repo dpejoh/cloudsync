@@ -1278,7 +1278,7 @@ const getSyncPlanInplace = async (
       generateTimeFmt: currTimeFmt,
       service: settings.serviceType,
       concurrency: settings.concurrency,
-      hasPassword: settings.password !== "",
+      hasPassword: true,
       syncConfigDir: settings.syncConfigDir,
       syncBookmarks: settings.syncBookmarks,
       syncUnderscoreItems: settings.syncUnderscoreItems,

@@ -55,7 +55,7 @@ export class DeletedFilesModal extends Modal {
 
       if (res.status === 200 && Array.isArray(res.json?.files)) {
         const rawFiles = res.json.files;
-        const { fsEncrypt } = this.plugin.getOrCreateClients();
+        const { fsEncrypt } = await this.plugin.getOrCreateClients();
         const mapped: TrashFile[] = [];
 
         for (const f of rawFiles) {

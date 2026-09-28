@@ -1,39 +1,40 @@
 import {
   type App,
   Notice,
+  Platform,
   PluginSettingTab,
   Setting,
-  Platform,
   requestUrl,
 } from "obsidian";
-import {
-  deriveZeroKnowledgeKeys,
-  deriveRecoveryVerifier,
-  generateRecoveryKey,
-} from "./authHelper";
-import { RecoveryKeyModal } from "./recoveryKeyModal";
 import { OBSIDIAN_LOGO_PNG } from "./assets/logo";
+import { generateRecoveryKey } from "./authHelper";
 import {
   type CloudSyncConfig,
   DEFAULT_CLOUDSYNC_CONFIG,
   type RemotelySavePluginSettings,
 } from "./baseTypes";
+import { ChangePasswordModal } from "./changePasswordModal";
+import { hexEncode } from "./cryptoV2";
+import { DeletedFilesModal } from "./deletedFilesModal";
 import {
-  initDeviceIdentity,
   backupDeviceSettings,
+  initDeviceIdentity,
   restoreDeviceSettings,
 } from "./deviceSettings";
-import { FakeFsWorker, type DeviceInfo } from "./fsWorker";
-import { TwoFactorModal } from "./twoFactorModal";
-import { VaultShareModal } from "./vaultShareModal";
-import { VaultPickerModal } from "./vaultPickerModal";
-import { ExcludedFoldersModal } from "./excludedFoldersModal";
-import { DeletedFilesModal } from "./deletedFilesModal";
-import { SyncLogModal } from "./syncLogModal";
 import { EditProfileModal } from "./editProfileModal";
+import { ExcludedFoldersModal } from "./excludedFoldersModal";
+import type { DeviceInfo, FakeFsWorker } from "./fsWorker";
 import { destroyDBs } from "./localdb";
-import { createOtpInput } from "./otpInput";
 import type CloudSyncPlugin from "./main";
+import { normalizeServerUrl } from "./misc";
+import { createOtpInput } from "./otpInput";
+import { RecoveryKeyModal } from "./recoveryKeyModal";
+import { confirmVaultRekey, runVaultRekey } from "./rotationUi";
+import { SyncLogModal } from "./syncLogModal";
+import { TwoFactorModal } from "./twoFactorModal";
+import { VaultPickerModal } from "./vaultPickerModal";
+import { cancelVaultRotation, isVaultRotationRunning } from "./vaultRotation";
+import { VaultShareModal } from "./vaultShareModal";
 
 function getResponseError(res: any, fallback: string): string {
   try {
@@ -561,34 +562,14 @@ export class CloudSyncSettingTab extends PluginSettingTab {
 
     const cs = this.plugin.settings.cloudsync;
     try {
-      const { authVerifier, encryptionKey } = await deriveZeroKnowledgeKeys(
-        "default",
-        this.passwordInput
-      );
-
-      const res = await requestUrl({
-        url: `${cs.serverUrl}/api/auth/single-login`,
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ verifier: authVerifier }),
-        throw: false,
+      await this.plugin.keyManager.loginSingle({
+        password: this.passwordInput,
       });
-
-      if (res.status !== 200) {
-        this.errorMessage = res.json?.error || "Invalid master password.";
-        this.isLoading = false;
-        this.display();
-        return;
-      }
-
-      cs.token = res.json.token;
       cs.sessionExpired = false;
       this.errorMessage = null;
       cs.userId = "default";
       cs.username = "Owner";
       cs.vaultId = this.app.vault.getName();
-      cs.encryptionKey = encryptionKey;
-      this.plugin.settings.password = encryptionKey;
       this.plugin.settings.encryptionMethod = "rclone-base64";
 
       await this.plugin.saveSettings();
@@ -617,101 +598,57 @@ export class CloudSyncSettingTab extends PluginSettingTab {
 
     const cs = this.plugin.settings.cloudsync;
     try {
-      const { authVerifier, encryptionKey } = await deriveZeroKnowledgeKeys(
-        this.usernameInput,
-        this.passwordInput
-      );
-
       if (this.isRegisterMode) {
-        const recoveryKey = generateRecoveryKey();
-        const recoveryVerifier = await deriveRecoveryVerifier(recoveryKey);
-        const res = await requestUrl({
-          url: `${cs.serverUrl}/api/auth/register`,
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            username: this.usernameInput,
-            verifier: authVerifier,
-            recoveryVerifier,
-          }),
-          throw: false,
+        const { recoveryKey } = await this.plugin.keyManager.register({
+          username: this.usernameInput,
+          password: this.passwordInput,
         });
-
-        if (res.status !== 200 && res.status !== 201) {
-          this.errorMessage = getResponseError(res, "Registration failed.");
-          this.isLoading = false;
-          this.display();
-          return;
-        }
-
-        cs.token = res.json?.token;
-        cs.sessionExpired = false;
-        this.errorMessage = null;
-        cs.userId = res.json?.user?.id || "";
-        cs.username = this.usernameInput;
         cs.vaultId = this.app.vault.getName();
-        cs.encryptionKey = encryptionKey;
         cs.has2FA = false;
-        cs.recoveryKey = recoveryKey;
-        this.plugin.settings.password = encryptionKey;
         this.plugin.settings.encryptionMethod = "rclone-base64";
-
         await this.plugin.saveSettings();
         await this.plugin.autoRegisterDevice();
 
         this.isLoading = false;
+        this.errorMessage = null;
         new Notice("Account created.");
-
-        new RecoveryKeyModal(this.app, recoveryKey, () => this.display()).open();
-
+        new RecoveryKeyModal(this.app, recoveryKey, () =>
+          this.display()
+        ).open();
         new TwoFactorModal(this.app, this.plugin, "intro", () => {
           this.display();
         }).open();
-      } else {
-        const res = await requestUrl({
-          url: `${cs.serverUrl}/api/auth/login`,
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            username: this.usernameInput,
-            verifier: authVerifier,
-            totpCode: this.totpCodeInput || undefined,
-          }),
-          throw: false,
-        });
-
-        if (res.json?.requires2FA) {
-          this.requires2FA = true;
-          this.isLoading = false;
-          this.errorMessage = null;
-          this.display();
-          return;
-        }
-
-        if (res.status !== 200) {
-          this.errorMessage = getResponseError(res, "Invalid username or password.");
-          this.isLoading = false;
-          this.display();
-          return;
-        }
-
-        cs.token = res.json.token;
-        cs.sessionExpired = false;
-        this.errorMessage = null;
-        cs.userId = res.json.user?.id || "";
-        cs.username = this.usernameInput;
-        cs.vaultId = this.app.vault.getName();
-        cs.encryptionKey = encryptionKey;
-        this.plugin.settings.password = encryptionKey;
-        this.plugin.settings.encryptionMethod = "rclone-base64";
-
-        await this.plugin.saveSettings();
-        await this.plugin.autoRegisterDevice();
-
-        new Notice("Signed in.");
-        this.isLoading = false;
-        this.display();
+        return;
       }
+
+      const result = await this.plugin.keyManager.login({
+        username: this.usernameInput,
+        password: this.passwordInput,
+        totpCode: this.totpCodeInput || undefined,
+      });
+      if ("requires2FA" in result && result.requires2FA) {
+        this.requires2FA = true;
+        this.isLoading = false;
+        this.errorMessage = null;
+        this.display();
+        return;
+      }
+      if ("legacy" in result && result.legacy) {
+        this.isLoading = false;
+        this.errorMessage =
+          "This account was created with an older version of CloudSync. Please register a new account.";
+        this.display();
+        return;
+      }
+
+      cs.vaultId = this.app.vault.getName();
+      this.plugin.settings.encryptionMethod = "rclone-base64";
+      await this.plugin.saveSettings();
+      await this.plugin.autoRegisterDevice();
+
+      new Notice("Signed in.");
+      this.isLoading = false;
+      this.display();
     } catch (err: any) {
       this.isLoading = false;
       this.errorMessage = `Authentication failed: ${err?.message || err}`;
@@ -927,14 +864,9 @@ export class CloudSyncSettingTab extends PluginSettingTab {
           if (!confirm("Are you sure you want to log out on this device?")) {
             return;
           }
-          cs.token = "";
-          cs.username = "";
-          cs.displayName = "";
-          cs.email = "";
-          cs.encryptionKey = "";
-          cs.sessionExpired = false;
+          await this.plugin.keyManager.logout();
           cs.vaultId = "";
-          this.plugin.settings.password = "";
+          cs.vaultOwner = "";
           this.plugin.clearCachedClients();
           await this.plugin.saveSettings();
           try {
@@ -1462,7 +1394,7 @@ export class CloudSyncSettingTab extends PluginSettingTab {
             const name = val.trim() || "My Device";
             this.plugin.settings.deviceName = name;
             await this.plugin.saveSettings();
-            const { fsRemote } = this.plugin.getOrCreateClients();
+            const { fsRemote } = await this.plugin.getOrCreateClients();
             if (
               fsRemote &&
               typeof (fsRemote as any).registerDevice === "function"
@@ -1493,7 +1425,8 @@ export class CloudSyncSettingTab extends PluginSettingTab {
           .onClick(async () => {
             btn.setDisabled(true);
             btn.setButtonText("Backing up...");
-            const { fsEncrypt, fsRemote } = this.plugin.getOrCreateClients();
+            const { fsEncrypt, fsRemote } =
+              await this.plugin.getOrCreateClients();
             try {
               const res = await backupDeviceSettings(
                 this.app,
@@ -1529,7 +1462,7 @@ export class CloudSyncSettingTab extends PluginSettingTab {
       .setName("Loading other devices...")
       .setDesc("Fetching connected devices from cloud");
 
-    const { fsRemote, fsEncrypt } = this.plugin.getOrCreateClients();
+    const { fsRemote, fsEncrypt } = await this.plugin.getOrCreateClients();
     if (fsRemote && typeof (fsRemote as any).getDevices === "function") {
       const workerClient = fsRemote as FakeFsWorker;
       this.plugin.autoRegisterDevice().catch(() => {});

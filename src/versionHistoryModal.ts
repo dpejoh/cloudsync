@@ -141,7 +141,7 @@ export class VersionHistoryModal extends Modal {
   }
 
   private async getEncryptedKey(): Promise<string> {
-    const { fsEncrypt } = this.plugin.getOrCreateClients();
+    const { fsEncrypt } = await this.plugin.getOrCreateClients();
     if (!fsEncrypt || fsEncrypt.isPasswordEmpty()) {
       return this.filePath;
     }
@@ -207,7 +207,7 @@ export class VersionHistoryModal extends Modal {
       });
 
       if (res.status === 200) {
-        const { fsEncrypt } = this.plugin.getOrCreateClients();
+        const { fsEncrypt } = await this.plugin.getOrCreateClients();
         if (fsEncrypt && !fsEncrypt.isPasswordEmpty()) {
           const decrypted = await (fsEncrypt as any)._decryptContent(res.arrayBuffer);
           this.selectedContent = new TextDecoder().decode(decrypted);
