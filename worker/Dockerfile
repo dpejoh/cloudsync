@@ -27,8 +27,10 @@ ENV NODE_ENV=production \
 # Copy compiled standalone bundle from builder stage
 COPY --from=builder /build/dist/server.mjs ./server.mjs
 
-# Create persistent storage mount point
-RUN mkdir -p /data
+# The server runs as an unprivileged user; an entrypoint fixes volume ownership.
+RUN apk add --no-cache su-exec && mkdir -p /data
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 VOLUME ["/data"]
 
@@ -38,4 +40,5 @@ EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
   CMD wget --no-verbose --tries=1 --spider http://localhost:3000/ || exit 1
 
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["node", "server.mjs"]

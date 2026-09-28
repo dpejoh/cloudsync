@@ -14,6 +14,9 @@ services:
       - DATA_DIR=/data
       - WORKER_MODE=multi # Options: "multi" (accounts + 2FA) or "single" (single master password)
       # - JWT_SECRET=change-this-to-a-secure-random-string # Optional (auto-generated in /data if omitted)
-      # - SINGLE_USER_PASSWORD=your-secret-password # Optional (if WORKER_MODE=single)
+      # - SINGLE_USER_PASSWORD=your-secret-password # REQUIRED for fresh deployments when WORKER_MODE=single
+      # - TRUST_PROXY=1 # Set only when running behind a trusted reverse proxy that sets X-Real-IP
+    security_opt:
+      - no-new-privileges:true
     volumes:
       - ./data:/data
