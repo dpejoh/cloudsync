@@ -17,7 +17,8 @@ CloudSync is an independent sync plugin for Obsidian, originally forked from [re
 
 ## Features
 
-- **Zero-Knowledge Encryption**: AES-256 client-side encryption. Note contents, filenames, and folder structures are encrypted before leaving your device.
+- **Zero-Knowledge Encryption**: Note contents, filenames, and folder structures are encrypted before leaving your device. Each vault has its own random key, unlocked by a random account master key (Argon2id-protected); see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+- **Vault Sharing**: invite by username; vault keys are delivered automatically through X25519 envelopes, and re-keying a vault revokes old keys.
 - **Dual Backend**:
   - **Cloudflare Workers & R2**: Serverless, zero egress fees, runs on the Cloudflare free tier.
   - **Self-Hosted VPS (Docker)**: Standalone Node.js server with embedded SQLite and local disk storage.
@@ -82,16 +83,16 @@ Server runs on port `3000` with data stored in `./data`.
 CloudSync uses **Username + Password + TOTP (2FA)** instead of email:
 
 - **Zero email dependencies**: No transactional mail services (Resend, SendGrid) or VPS mail daemons required. Deployments stay completely self-contained.
-- **Save your recovery key**: Registration generates a recovery key used to reset your password if you lose your authenticator app. It is shown once and stored locally; keep it offline. Password reset works with either the recovery key or a TOTP code.
-- **Encryption caveat**: resetting your password derives a new encryption key. Notes encrypted with the old password remain unreadable unless you still know the old password. With zero-knowledge encryption there is no server-side recovery of note contents.
+- **Save your recovery key**: Registration generates a recovery key used to reset your password if you lose your authenticator app. It is shown once and stored locally; keep it offline. Resetting with the **recovery key** keeps your notes readable; resetting with only a **2FA code** cannot restore the note-encryption keys and the app warns you first.
 
 ---
 
 ## Security Notes
 
-- **Server secret**: deployments require `JWT_SECRET` (Cloudflare secret or VPS env var). The backend refuses authenticated traffic when it is missing, so a misconfigured instance fails closed instead of accepting forged tokens.
-- **Encrypted-mode limits**: the server never sees note contents or file names, but it necessarily sees object counts, approximate sizes, timestamps, and access patterns.
-- **Server-initiated tampering**: with the default `rclone-base64` mode, content is authenticated (tampering is detected), but a malicious server can still replay or delete whole objects. The legacy `openssl-base64` mode is unauthenticated and should not be used for new vaults.
+- **Key model**: random per-vault keys wrapped by a random account master key (Argon2id, per-account salt). Changing your password re-wraps keys instead of re-encrypting notes, and your recovery key can restore access to them. Details in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [SECURITY.md](SECURITY.md).
+- **Integrity**: every object carries an HMAC binding its encrypted name to its content, so a malicious server cannot silently swap or modify notes.
+- **Server secret**: deployments require `JWT_SECRET` (Cloudflare secret or VPS env var). The backend refuses authenticated traffic when it is missing.
+- **Metadata**: the server never sees contents or file names, but it necessarily sees object counts, sizes, timestamps, device names, and access patterns. TOTP secrets are server-verified.
 - **Limits**: 100 MB per object, 10 GB per account, cloud trash retained 30 days, up to 50 history versions per file (2 MB each).
 - **VPS**: always run behind HTTPS; `docker compose` starts the server as an unprivileged user with `no-new-privileges`.
 
