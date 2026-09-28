@@ -752,6 +752,8 @@ export class CloudSyncSettingTab extends PluginSettingTab {
       return;
     }
 
+    await this.renderRotationBanner(containerEl);
+
     if (this.plugin.settings.encryptionMethod === "openssl-base64") {
       new Setting(containerEl)
         .setClass("banner-2fa")
@@ -1521,42 +1523,201 @@ export class CloudSyncSettingTab extends PluginSettingTab {
       otherDevicesContainer.empty();
       new Setting(otherDevicesContainer)
         .setName("Other devices")
-        .setDesc("Device backups will be available once connected to CloudSync.");
+        .setDesc(
+          "Device backups will be available once connected to CloudSync."
+        );
     }
 
     // 5. History & Recovery Tools
-    new Setting(containerEl)
-      .setName("History & Recovery Tools")
-      .setHeading();
+    new Setting(containerEl).setName("History & Recovery Tools").setHeading();
 
     new Setting(containerEl)
       .setName("Deleted files (Trash)")
       .setDesc("Recover files deleted from your vault within the last 30 days")
       .addButton((btn) => {
-        btn
-          .setButtonText("Browse trash")
-          .onClick(() => {
-            new DeletedFilesModal(this.app, this.plugin, false).open();
-          });
+        btn.setButtonText("Browse trash").onClick(() => {
+          new DeletedFilesModal(this.app, this.plugin, false).open();
+        });
       })
       .addButton((btn) => {
-        btn
-          .setButtonText("Bulk restore")
-          .onClick(() => {
-            new DeletedFilesModal(this.app, this.plugin, true).open();
-          });
+        btn.setButtonText("Bulk restore").onClick(() => {
+          new DeletedFilesModal(this.app, this.plugin, true).open();
+        });
       });
 
     new Setting(containerEl)
       .setName("Sync activity log")
-      .setDesc("Inspect detailed sync operations and network logs for troubleshooting")
+      .setDesc(
+        "Inspect detailed sync operations and network logs for troubleshooting"
+      )
       .addButton((btn) => {
-        btn
-          .setButtonText("Open log")
-          .onClick(() => {
-            new SyncLogModal(this.app, this.plugin).open();
-          });
+        btn.setButtonText("Open log").onClick(() => {
+          new SyncLogModal(this.app, this.plugin).open();
+        });
       });
+
+    if (!isSharedVault && cs.scheme === 2) {
+      new Setting(containerEl).setName("Advanced").setHeading();
+
+      new Setting(containerEl)
+        .setName("Re-key vault key")
+        .setDesc(
+          "Generate a new random vault key and re-encrypt every file. Use it to invalidate a key that someone else may have seen."
+        )
+        .addButton((btn) => {
+          btn
+            .setButtonText("Re-key vault")
+            .setWarning()
+            .onClick(async () => {
+              if (!cs.vaultId || !confirmVaultRekey()) return;
+              if (this.plugin.isSyncing || this.plugin.isFastSyncing) {
+                new Notice(
+                  "Wait for the current sync to finish before re-keying."
+                );
+                return;
+              }
+              if (isVaultRotationRunning(this.plugin, cs.vaultId)) {
+                new Notice(
+                  "A re-key is already running on this device. See the banner above for progress."
+                );
+                return;
+              }
+              await runVaultRekey(this.plugin, cs.vaultId);
+              this.display();
+            });
+        });
+
+      new Setting(containerEl)
+        .setName("Reset local sync database")
+        .setDesc(
+          "Forgets the local record of what was synced so the next sync compares local and remote from scratch. Use it when a sync reports mass modifications after switching accounts or vaults. Nothing is deleted from disk or cloud."
+        )
+        .addButton((btn) => {
+          btn
+            .setButtonText("Reset")
+            .setWarning()
+            .onClick(async () => {
+              if (
+                !confirm(
+                  "Reset the local sync database? The next sync will compare everything fresh. Nothing is deleted from disk or cloud."
+                )
+              ) {
+                return;
+              }
+              await this.plugin.resetLocalSyncState();
+              this.display();
+            });
+        });
+
+      new Setting(containerEl)
+        .setName("Write re-key debug log")
+        .setDesc(
+          "Append every re-key step to rotation-debug.log in the plugin folder, for troubleshooting long or interrupted re-keys."
+        )
+        .addToggle((toggle) =>
+          toggle
+            .setValue(this.plugin.settings.debugRotationLog ?? true)
+            .onChange(async (value) => {
+              this.plugin.settings.debugRotationLog = value;
+              await this.plugin.saveSettings();
+            })
+        );
+
+      new Setting(containerEl)
+        .setName("Export vault encryption key")
+        .setDesc(
+          "Only needed to decrypt an offline copy of this vault (for example with rclone) or to recover if the server ever loses your key material. Sharing a vault never needs this."
+        )
+        .addButton((btn) => {
+          btn
+            .setButtonText("Copy vault key")
+            .setWarning()
+            .onClick(async () => {
+              const vaultKey = cs.vaultId
+                ? await this.plugin.keyManager.getVaultKey(cs.vaultId)
+                : null;
+              if (!vaultKey) {
+                new Notice("This vault has no encryption key to export yet.");
+                return;
+              }
+              await navigator.clipboard.writeText(hexEncode(vaultKey));
+              new Notice(
+                "Vault key copied. Anyone with it and a copy of the encrypted vault can read everything in it. Store it offline and never share it for collaboration.",
+                12000
+              );
+            });
+        });
+    }
+  }
+
+  private async renderRotationBanner(containerEl: HTMLElement) {
+    const cs = this.plugin.settings.cloudsync;
+    if (cs.scheme !== 2 || !cs.vaultId || !cs.serverUrl || !cs.token) return;
+    try {
+      const res = await requestUrl({
+        url: `${cs.serverUrl}/api/vaults`,
+        headers: { Authorization: `Bearer ${cs.token}` },
+        throw: false,
+      });
+      if (res.status !== 200 || !Array.isArray(res.json?.vaults)) return;
+      const vault = res.json.vaults.find(
+        (v: any) => v.name === cs.vaultId && !v.isShared
+      );
+      if (!vault?.rotating) return;
+
+      const ownedByThisDevice =
+        !vault.rotatingBy || vault.rotatingBy === this.plugin.settings.deviceId;
+      const progress = cs.lastRotationProgress;
+      const progressLine = progress
+        ? `\n\nProgress: ${progress.message} (updated ${new Date(
+            progress.updatedAt
+          ).toLocaleTimeString()})`
+        : "";
+      const banner = new Setting(containerEl)
+        .setClass("banner-2fa")
+        .setName(
+          ownedByThisDevice
+            ? "Vault re-key needs finishing"
+            : "Vault re-key is running elsewhere"
+        )
+        .setDesc(
+          ownedByThisDevice
+            ? `Sync is paused for this vault. Finish the re-key to restore syncing, or cancel to keep the previous key.${progressLine}${
+                cs.lastRotationError
+                  ? `\n\nLast error: ${cs.lastRotationError}`
+                  : ""
+              }`
+            : "Another device is re-keying this vault. Wait for it to finish; sync resumes automatically."
+        );
+      if (!ownedByThisDevice) return;
+
+      banner
+        .addButton((btn) => {
+          btn
+            .setButtonText("Retry re-key")
+            .setCta()
+            .onClick(async () => {
+              await runVaultRekey(this.plugin, cs.vaultId);
+              this.display();
+            });
+        })
+        .addButton((btn) => {
+          btn.setButtonText("Cancel rotation").onClick(async () => {
+            try {
+              await cancelVaultRotation(this.plugin, cs.vaultId);
+              cs.lastRotationError = undefined;
+              cs.lastRotationProgress = undefined;
+              await this.plugin.saveSettings();
+              new Notice(
+                "Rotation canceled. The previous vault key is still in use."
+              );
+            } catch (err: any) {
+              new Notice(`Failed to cancel: ${err?.message || err}`);
+            }
+            this.display();
+          });
+        });
+    } catch {}
   }
 
   private async fetchStorageUsage() {

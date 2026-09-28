@@ -115,6 +115,7 @@ const DEFAULT_SETTINGS: RemotelySavePluginSettings = {
   syncCommunityPlugins: false,
   syncCommunityPluginData: false,
   showSyncNotifications: false,
+  debugRotationLog: true,
 };
 
 const iconNameSyncWait = `cloudsync-sync-wait`;
@@ -144,6 +145,7 @@ export default class CloudSyncPlugin extends Plugin {
   vaultRandomID!: string;
   currSyncMsg?: string;
   isSyncing = false;
+  isRotating = false;
   syncRibbon?: HTMLElement;
   statusBarElement?: HTMLSpanElement;
   autoRunIntervalID?: number;
@@ -594,20 +596,27 @@ export default class CloudSyncPlugin extends Plugin {
 
     const errNotifyFunc = async (s: SyncTriggerSourceType, err: any) => {
       const errMsg = err?.message || `${err}`;
-      const isAuthError = errMsg.includes("401") || errMsg.includes("Unauthorized");
+      const isAuthError =
+        errMsg.includes("401") || errMsg.includes("Unauthorized");
+      const isRotationLock =
+        errMsg.includes("being re-keyed") || errMsg.includes("was re-keyed");
       if (isAuthError) {
         await this.markSessionExpired().catch(() => {});
       }
       this.addSyncLog({
-        type: "error",
+        type: isRotationLock ? "info" : "error",
         message: isAuthError
           ? "CloudSync session expired. Please log in again from Settings."
-          : `Sync error: ${errMsg}`,
+          : isRotationLock
+            ? "Sync paused: a vault re-key is in progress."
+            : `Sync error: ${errMsg}`,
       });
       new Notice(
         isAuthError
           ? "CloudSync session expired. Please log in again from Settings."
-          : `Sync error: ${errMsg}`,
+          : isRotationLock
+            ? "Sync paused: a vault re-key is in progress."
+            : `Sync error: ${errMsg}`,
         isAuthError ? 8000 : 5000
       );
     };
@@ -675,7 +684,7 @@ export default class CloudSyncPlugin extends Plugin {
       }
     };
 
-    if (this.isSyncing || this.isFastSyncing) {
+    if (this.isSyncing || this.isFastSyncing || this.isRotating) {
       if (triggerSource === "manual") {
         new Notice("Sync is already running.");
       }
@@ -1060,6 +1069,34 @@ export default class CloudSyncPlugin extends Plugin {
       this.vaultRandomID,
       this.manifest.version
     );
+
+    // If the app closed mid-re-key, the vault stays locked and every sync
+    // fails. Resume automatically on the device that started it.
+    window.setTimeout(() => {
+      this.resumeRotationIfNeeded().catch(() => {});
+    }, 4000);
+  }
+
+  async resumeRotationIfNeeded(): Promise<void> {
+    try {
+      const cs = this.settings.cloudsync;
+      if (!cs?.token || !cs.vaultId || cs.scheme !== 2) return;
+      if (!this.isUnlockedForSync()) return;
+      const state = await this.keyManager
+        .getOwnedVaultState(cs.vaultId)
+        .catch(() => null);
+      if (!state?.rotating) return;
+      if (state.rotatingBy && state.rotatingBy !== this.settings.deviceId) {
+        new Notice(
+          "A vault re-key is running on another device. Sync stays paused until it finishes.",
+          8000
+        );
+        return;
+      }
+      new Notice("Resuming the interrupted vault re-key...", 5000);
+      await runVaultRekey(this, cs.vaultId);
+      this.settingTab?.display();
+    } catch {}
   }
 
   async onunload() {
@@ -1183,10 +1220,11 @@ export default class CloudSyncPlugin extends Plugin {
       }
     });
 
-    const doc = typeof activeDocument !== "undefined" ? activeDocument : window.document;
+    const doc =
+      typeof activeDocument !== "undefined" ? activeDocument : window.document;
     const handleCursorMove = () => {
       wakeSync();
-      if (this.isSyncing || this.isFastSyncing) {
+      if (this.isSyncing || this.isFastSyncing || this.isRotating) {
         return;
       }
       const activeView = this.app.workspace.activeLeaf?.view as any;
@@ -1221,25 +1259,31 @@ export default class CloudSyncPlugin extends Plugin {
   }
 
   async runLivePulse() {
-    if (this.isSyncing || this.isFastSyncing) return;
+    if (this.isSyncing || this.isFastSyncing || this.isRotating) return;
     if (typeof navigator !== "undefined" && !navigator.onLine) return;
     if (document.visibilityState !== "visible") return;
-    if (!this.settings.cloudsync?.token || !this.settings.cloudsync?.vaultId) return;
+    if (!this.settings.cloudsync?.token || !this.settings.cloudsync?.vaultId)
+      return;
+    if (!this.isUnlockedForSync()) return;
 
-    const { fsRemote, profileID } = this.getOrCreateClients();
+    const { fsRemote, profileID } = await this.getOrCreateClients();
 
     try {
       const changesRes = await fsRemote.getChanges(this.lastKnownRevision);
       if (!changesRes || !changesRes.ok) return;
 
       if (changesRes.fullScanNeeded) {
-        console.info("CloudSync: Remote changes exceeded buffer, triggering full sync");
+        console.info(
+          "CloudSync: Remote changes exceeded buffer, triggering full sync"
+        );
         await this.syncRun("auto");
         return;
       }
 
       if (changesRes.changes && changesRes.changes.length > 0) {
-        console.info(`CloudSync: Received ${changesRes.changes.length} remote change(s)`);
+        console.info(
+          `CloudSync: Received ${changesRes.changes.length} remote change(s)`
+        );
         await this.runFastPull(changesRes.changes);
       }
 
@@ -1288,19 +1332,22 @@ export default class CloudSyncPlugin extends Plugin {
   }
 
   async sendCursorUpdate(path: string, cursor: { line: number; ch: number }) {
-    if (this.isSyncing || this.isFastSyncing) return;
-    if (!this.settings.cloudsync?.token || !this.settings.cloudsync?.vaultId) return;
+    if (this.isSyncing || this.isFastSyncing || this.isRotating) return;
+    if (!this.settings.cloudsync?.token || !this.settings.cloudsync?.vaultId)
+      return;
+    if (!this.isUnlockedForSync()) return;
 
-    const { fsEncrypt } = this.getOrCreateClients();
+    const { fsEncrypt } = await this.getOrCreateClients();
     try {
       await fsEncrypt.updateCursor(path, cursor);
     } catch {}
   }
 
   async runFastPull(changes: VaultChangeItem[]) {
-    if (this.isSyncing || this.isFastSyncing) return;
+    if (this.isSyncing || this.isFastSyncing || this.isRotating) return;
+    if (!this.isUnlockedForSync()) return;
     this.isFastSyncing = true;
-    const { fsLocal, fsEncrypt, profileID } = this.getOrCreateClients();
+    const { fsLocal, fsEncrypt, profileID } = await this.getOrCreateClients();
 
     try {
       if (this.statusBarElement) {
@@ -1426,7 +1473,7 @@ export default class CloudSyncPlugin extends Plugin {
   }
 
   async triggerDebouncedPush() {
-    if (this.isSyncing || this.isFastSyncing) return;
+    if (this.isSyncing || this.isFastSyncing || this.isRotating) return;
     if (this.pendingModifiedPaths.size === 0) return;
 
     const pathsToSync = Array.from(this.pendingModifiedPaths);
@@ -1444,9 +1491,11 @@ export default class CloudSyncPlugin extends Plugin {
   }
 
   async runFastPush(paths: string[], deletedPaths: Set<string> = new Set()) {
-    if (this.isSyncing || this.isFastSyncing) return;
+    if (this.isSyncing || this.isFastSyncing || this.isRotating) return;
+    if (!this.isUnlockedForSync()) return;
     this.isFastSyncing = true;
-    const { fsLocal, fsRemote, fsEncrypt, profileID } = this.getOrCreateClients();
+    const { fsLocal, fsRemote, fsEncrypt, profileID } =
+      await this.getOrCreateClients();
 
     try {
       if (this.statusBarElement) {

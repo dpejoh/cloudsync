@@ -124,6 +124,8 @@ export interface RemotelySavePluginSettings {
   syncCommunityPlugins?: boolean;
   syncCommunityPluginData?: boolean;
   showSyncNotifications?: boolean;
+  /** Write re-key progress to a local log file for troubleshooting. */
+  debugRotationLog?: boolean;
 }
 
 export const COMMAND_URI = "cloudsync";
