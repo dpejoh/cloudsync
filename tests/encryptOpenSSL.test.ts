@@ -12,6 +12,26 @@ import {
 } from "../src/encryptOpenSSL";
 import { base64ToBase64url, bufferToArrayBuffer } from "../src/misc";
 
+const testFolder = path.join(__dirname, "static_assets", "mona_lisa");
+const testFileName =
+  "1374px-Mona_Lisa,_by_Leonardo_da_Vinci,_from_C2RMF_retouched.jpg";
+
+function isLfsPointer(filePath: string): boolean {
+  try {
+    const buf = fs.readFileSync(filePath);
+    return (
+      buf.length < 1024 &&
+      buf.toString("utf-8").startsWith("version https://git-lfs")
+    );
+  } catch {
+    return true;
+  }
+}
+
+// Binary fixtures are stored with Git LFS. Skip the byte-for-byte openssl
+// comparisons when the assets were checked out without LFS (`git lfs pull`).
+const binaryFixturesAvailable = !isLfsPointer(path.join(testFolder, testFileName));
+
 describe("Encryption OpenSSL tests", () => {
   beforeEach(() => {
     global.window = {
@@ -77,7 +97,7 @@ describe("Encryption OpenSSL tests", () => {
     assert.equal(enc, opensslBase64urlRes);
   });
 
-  it("should encrypt binary file and get the same result as openssl", async () => {
+  it.skipIf(!binaryFixturesAvailable)("should encrypt binary file and get the same result as openssl", async () => {
     const testFolder = path.join(__dirname, "static_assets", "mona_lisa");
     const testFileName =
       "1374px-Mona_Lisa,_by_Leonardo_da_Vinci,_from_C2RMF_retouched.jpg";
@@ -115,7 +135,7 @@ describe("Encryption OpenSSL tests", () => {
     assert.ok(!Buffer.from(res1).equals(Buffer.from(res2)));
   });
 
-  it("should decrypt binary file and get the same result as openssl", async () => {
+  it.skipIf(!binaryFixturesAvailable)("should decrypt binary file and get the same result as openssl", async () => {
     const testFolder = path.join(__dirname, "static_assets", "mona_lisa");
     const testFileName =
       "1374px-Mona_Lisa,_by_Leonardo_da_Vinci,_from_C2RMF_retouched.jpg";

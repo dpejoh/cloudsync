@@ -18,6 +18,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          lfs: true
 
       - name: Setup Node.js ${{ matrix.node-version }}
         uses: actions/setup-node@v4
@@ -27,13 +29,17 @@ jobs:
       - name: Install plugin dependencies
         run: npm install
 
+      - name: Unit tests
+        run: npm test
+
       - name: Build and typecheck plugin
         run: npm run build-check
 
-      - name: Install worker dependencies and test VPS server
+      - name: Install worker dependencies, typecheck and test VPS server
         run: |
           cd worker
           npm install
+          npm run typecheck
           npm run test:vps
 
       - name: Upload plugin artifacts

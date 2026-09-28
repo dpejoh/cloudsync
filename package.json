@@ -6,6 +6,8 @@
     "dev": "node esbuild.config.mjs --watch",
     "build": "node esbuild.config.mjs production",
     "build-check": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "typecheck": "tsc -noEmit -skipLibCheck",
+    "test": "vitest run",
     "format": "npx @biomejs/biome check --write .",
     "clean": "npx rimraf main.js"
   },
@@ -30,6 +32,7 @@
   "author": "dpejoh",
   "license": "Apache-2.0",
   "devDependencies": {
+    "@biomejs/biome": "^1.8.3",
     "@types/lodash": "^4.17.7",
     "@types/mime-types": "^2.1.4",
     "@types/mustache": "^4.2.5",
@@ -38,10 +41,12 @@
     "dotenv": "^16.4.5",
     "esbuild": "^0.23.0",
     "esbuild-plugin-inline-worker": "^0.1.1",
+    "jsdom": "^30.1.1",
     "obsidian": "^1.5.7",
     "rimraf": "^6.0.1",
     "tslib": "^2.6.3",
-    "typescript": "^5.5.4"
+    "typescript": "^5.5.4",
+    "vitest": "^1.6.1"
   },
   "dependencies": {
     "@fyears/rclone-crypt": "^0.0.7",

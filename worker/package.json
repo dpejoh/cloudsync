@@ -8,7 +8,8 @@
     "deploy": "wrangler deploy",
     "build:vps": "esbuild src/standalone.ts --bundle --platform=node --target=node22 --format=esm --outfile=dist/server.mjs --external:node:*",
     "start:vps": "node dist/server.mjs",
-    "test:vps": "npm run build:vps && node src/vps/test-vps.mjs"
+    "test:vps": "npm run build:vps && node src/vps/test-vps.mjs",
+    "typecheck": "tsc"
   },
   "dependencies": {
     "@hono/node-server": "^2.1.1",
@@ -16,6 +17,7 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20240909.0",
+    "@types/node": "^22.20.4",
     "esbuild": "^0.17.19",
     "typescript": "^5.5.4",
     "wrangler": "^3.78.0"
