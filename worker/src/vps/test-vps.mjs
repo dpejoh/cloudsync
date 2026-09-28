@@ -41,7 +41,7 @@ async function runTests() {
 
   const healthRes = await fetch(`${BASE_URL}/`);
   const healthJson = await healthRes.json();
-  if (healthJson.status !== "ok" || healthJson.version !== "2.1.0") {
+  if (healthJson.status !== "ok" || healthJson.version !== "3.0.0") {
     throw new Error(`Health check failed: ${JSON.stringify(healthJson)}`);
   }
   console.log("[1/18] GET / -> ok");

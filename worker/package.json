@@ -9,7 +9,9 @@
     "build:vps": "esbuild src/standalone.ts --bundle --platform=node --target=node22 --format=esm --outfile=dist/server.mjs --external:node:*",
     "start:vps": "node dist/server.mjs",
     "test:vps": "npm run build:vps && node src/vps/test-vps.mjs",
-    "typecheck": "tsc"
+    "typecheck": "tsc",
+    "test:v2": "npm run build:vps && node src/vps/test-v2.mjs",
+    "test:server": "npm run build:vps && node src/vps/test-vps.mjs && node src/vps/test-v2.mjs"
   },
   "dependencies": {
     "@hono/node-server": "^2.1.1",

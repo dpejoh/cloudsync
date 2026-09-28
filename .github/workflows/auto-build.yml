@@ -38,7 +38,7 @@ jobs:
           cd worker
           npm install
           npm run typecheck
-          npm run test:vps
+          npm run test:server
 
       - name: Upload plugin artifacts
         uses: actions/upload-artifact@v4
