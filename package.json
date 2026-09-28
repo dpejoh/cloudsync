@@ -51,6 +51,8 @@
   "dependencies": {
     "@fyears/rclone-crypt": "^0.0.7",
     "@fyears/tsqueue": "^1.0.1",
+    "@noble/curves": "^1.9.7",
+    "@noble/hashes": "^1.8.0",
     "aggregate-error": "^5.0.0",
     "assert": "^2.1.0",
     "buffer": "^6.0.3",
